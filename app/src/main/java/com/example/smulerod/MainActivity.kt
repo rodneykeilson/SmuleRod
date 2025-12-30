@@ -549,7 +549,11 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
-            val cleanUrl = smuleUrl.split("?")[0].trim().trimEnd('/')
+            var cleanUrl = smuleUrl.trim()
+            if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                cleanUrl = "https://$cleanUrl"
+            }
+            cleanUrl = cleanUrl.split("?")[0].trim().trimEnd('/')
             val twitterUrl = "$cleanUrl/twitter"
             val client = OkHttpClient.Builder().followRedirects(true).build()
             val request = Request.Builder().url(twitterUrl).header("User-Agent", "Mozilla/5.0").build()
