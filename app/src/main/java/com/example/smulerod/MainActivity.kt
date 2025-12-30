@@ -58,6 +58,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -67,6 +68,8 @@ import coil.decode.VideoFrameDecoder
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -680,8 +683,34 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        var isPlaying by remember { mutableStateOf(true) }
+        var currentPosition by remember { mutableStateOf(0L) }
+        var duration by remember { mutableStateOf(0L) }
+
         DisposableEffect(Unit) {
-            onDispose { exoPlayer.release() }
+            val listener = object : Player.Listener {
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    isPlaying = playing
+                }
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_READY) {
+                        duration = exoPlayer.duration
+                    }
+                }
+            }
+            exoPlayer.addListener(listener)
+            onDispose { 
+                exoPlayer.removeListener(listener)
+                exoPlayer.release() 
+            }
+        }
+
+        // Update progress
+        LaunchedEffect(isPlaying) {
+            while (isActive && isPlaying) {
+                currentPosition = exoPlayer.currentPosition
+                delay(500)
+            }
         }
 
         Dialog(
@@ -704,59 +733,129 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        // Audio Player UI
+                        // Modern Audio Player UI (Spotify-style)
                         Column(
-                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                            modifier = Modifier.fillMaxSize().padding(32.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(240.dp)
-                                    .clip(RoundedCornerShape(24.dp))
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
-                                contentAlignment = Alignment.Center
+                            // Album Art
+                            Card(
+                                modifier = Modifier.size(280.dp),
+                                shape = RoundedCornerShape(24.dp),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
                             ) {
-                                Icon(
-                                    Icons.Default.MusicNote,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(120.dp),
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
+                                Box(
+                                    modifier = Modifier.fillMaxSize().background(
+                                        brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                            colors = listOf(
+                                                MaterialTheme.colorScheme.primaryContainer,
+                                                MaterialTheme.colorScheme.secondaryContainer
+                                            )
+                                        )
+                                    ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.MusicNote,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(140.dp),
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
                             }
                             
-                            Spacer(modifier = Modifier.height(32.dp))
+                            Spacer(modifier = Modifier.height(48.dp))
                             
+                            // Title & Artist
                             Text(
-                                text = file.name,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
+                                text = file.name.substringBeforeLast("."),
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.ExtraBold,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                             
-                            Spacer(modifier = Modifier.height(8.dp))
-                            
                             Text(
                                 text = "Smule Recording",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
                             )
                             
-                            Spacer(modifier = Modifier.height(48.dp))
+                            Spacer(modifier = Modifier.height(40.dp))
                             
-                            // Proper Audio Controls
-                            AndroidView(
-                                factory = {
-                                    PlayerControlView(it).apply {
-                                        player = exoPlayer
-                                        showTimeoutMs = 0 // Keep controls visible
-                                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth().height(100.dp)
-                            )
+                            // Progress Bar
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Slider(
+                                    value = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f,
+                                    onValueChange = { 
+                                        if (duration > 0) {
+                                            exoPlayer.seekTo((it * duration).toLong())
+                                            currentPosition = exoPlayer.currentPosition
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = formatTime(currentPosition),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = formatTime(duration),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(24.dp))
+                            
+                            // Playback Controls
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { exoPlayer.seekTo(currentPosition - 10000) },
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    Icon(Icons.Default.Replay10, null, modifier = Modifier.size(32.dp))
+                                }
+                                
+                                FilledIconButton(
+                                    onClick = { if (isPlaying) exoPlayer.pause() else exoPlayer.play() },
+                                    modifier = Modifier.size(80.dp),
+                                    colors = IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary
+                                    )
+                                ) {
+                                    Icon(
+                                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                }
+                                
+                                IconButton(
+                                    onClick = { exoPlayer.seekTo(currentPosition + 10000) },
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    Icon(Icons.Default.Forward10, null, modifier = Modifier.size(32.dp))
+                                }
+                            }
                         }
                     }
                     
@@ -773,6 +872,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun formatTime(ms: Long): String {
+        val totalSeconds = ms / 1000
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return String.format("%02d:%02d", minutes, seconds)
     }
 
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
