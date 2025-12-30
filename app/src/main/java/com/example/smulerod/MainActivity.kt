@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
@@ -248,6 +249,7 @@ class MainActivity : ComponentActivity() {
         var isLoading by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         val keyboardController = LocalSoftwareKeyboardController.current
+        val clipboardManager = LocalClipboardManager.current
 
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -260,6 +262,13 @@ class MainActivity : ComponentActivity() {
                 label = { Text("Paste Smule Link") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
+                trailingIcon = {
+                    IconButton(onClick = {
+                        clipboardManager.getText()?.let { url = it.text }
+                    }) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = "Paste from clipboard")
+                    }
+                },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done)
             )
             Spacer(modifier = Modifier.height(24.dp))
