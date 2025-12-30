@@ -559,51 +559,65 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
             var cleanUrl = smuleUrl.trim()
-            // Handle cases where user pastes "smule.com/..." or "www.smule.com/..."
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
                 cleanUrl = "https://$cleanUrl"
             }
             
-            // Remove query parameters but keep the path
             val uri = Uri.parse(cleanUrl)
             val path = uri.path ?: return@withContext null
             val baseHost = if (uri.host?.contains("smule.com") == true) uri.host else "www.smule.com"
             val finalBaseUrl = "https://$baseHost$path"
             
-            val twitterUrl = "${finalBaseUrl.trimEnd('/')}/twitter"
             val client = OkHttpClient.Builder()
                 .followRedirects(true)
                 .build()
             
-            val request = Request.Builder()
-                .url(twitterUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            // Strategy 1: Try the main page first (often contains the meta tags directly)
+            val mainRequest = Request.Builder()
+                .url(finalBaseUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
                 .build()
             
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) return@withContext null
+            val mainResponse = client.newCall(mainRequest).execute()
+            val mainHtml = mainResponse.body?.string() ?: ""
+            var doc = Jsoup.parse(mainHtml)
             
-            val html = response.body?.string() ?: return@withContext null
-            val doc = Jsoup.parse(html)
+            var title = doc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
+            var streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
             
-            val title = doc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
-            val redirUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
-            
-            if (redirUrl.isBlank()) {
-                // Fallback: try to find the stream URL in the main page if /twitter fails
-                val mainRequest = Request.Builder().url(finalBaseUrl).header("User-Agent", "Mozilla/5.0").build()
-                val mainResponse = client.newCall(mainRequest).execute()
-                val mainHtml = mainResponse.body?.string() ?: ""
-                val mainDoc = Jsoup.parse(mainHtml)
-                val fallbackUrl = mainDoc.select("meta[name=twitter:player:stream]").attr("content")
-                if (fallbackUrl.isBlank()) return@withContext null
-                
-                val redirResponse = client.newCall(Request.Builder().url(fallbackUrl).head().build()).execute()
-                return@withContext SmuleMedia(title, redirResponse.request.url.toString())
+            // Strategy 2: Try /twitter endpoint if main page fails
+            if (streamUrl.isBlank()) {
+                val twitterUrl = "${finalBaseUrl.trimEnd('/')}/twitter"
+                val twitterRequest = Request.Builder()
+                    .url(twitterUrl)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
+                    .build()
+                val twitterResponse = client.newCall(twitterRequest).execute()
+                val twitterHtml = twitterResponse.body?.string() ?: ""
+                doc = Jsoup.parse(twitterHtml)
+                streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
             }
 
-            val redirResponse = client.newCall(Request.Builder().url(redirUrl).head().build()).execute()
-            return@withContext SmuleMedia(title, redirResponse.request.url.toString())
+            // Strategy 3: Look for JSON data in the page (Smule often embeds state in a script tag)
+            if (streamUrl.isBlank()) {
+                val scriptTags = doc.select("script")
+                for (script in scriptTags) {
+                    val data = script.data()
+                    if (data.contains("stream_url")) {
+                        val match = Regex("\"stream_url\":\"(.*?)\"").find(data)
+                        streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
+                        if (streamUrl.isNotBlank()) break
+                    }
+                }
+            }
+
+            if (streamUrl.isBlank()) return@withContext null
+
+            // Follow the stream URL to get the final media link
+            val redirResponse = client.newCall(Request.Builder().url(streamUrl).head().build()).execute()
+            val finalUrl = redirResponse.request.url.toString()
+            
+            return@withContext SmuleMedia(title, finalUrl)
         } catch (e: Exception) { 
             e.printStackTrace()
             null 
