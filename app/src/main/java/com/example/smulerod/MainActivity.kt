@@ -240,7 +240,7 @@ class MainActivity : ComponentActivity() {
         }
 
         playingFile?.let { file ->
-            VideoPlayerDialog(file = file, onDismiss = { playingFile = null })
+            MediaPlayerDialog(file = file, onDismiss = { playingFile = null })
         }
     }
 
@@ -667,8 +667,10 @@ class MainActivity : ComponentActivity() {
 
     @androidx.annotation.OptIn(UnstableApi::class)
     @Composable
-    fun VideoPlayerDialog(file: DownloadedFile, onDismiss: () -> Unit) {
+    fun MediaPlayerDialog(file: DownloadedFile, onDismiss: () -> Unit) {
         val context = LocalContext.current
+        val isVideo = file.name.endsWith(".mp4")
+        
         val exoPlayer = remember {
             ExoPlayer.Builder(context).build().apply {
                 setMediaItem(MediaItem.fromUri(file.uri))
@@ -687,24 +689,88 @@ class MainActivity : ComponentActivity() {
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = Color.Black
+                color = if (isVideo) Color.Black else MaterialTheme.colorScheme.background
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    AndroidView(
-                        factory = {
-                            PlayerView(it).apply {
-                                player = exoPlayer
-                                useController = true
+                    if (isVideo) {
+                        AndroidView(
+                            factory = {
+                                PlayerView(it).apply {
+                                    player = exoPlayer
+                                    useController = true
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        // Audio Player UI
+                        Column(
+                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(240.dp)
+                                    .clip(RoundedCornerShape(24.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.MusicNote,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(120.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
                             }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                            
+                            Spacer(modifier = Modifier.height(32.dp))
+                            
+                            Text(
+                                text = file.name,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Text(
+                                text = "Smule Recording",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            
+                            Spacer(modifier = Modifier.height(48.dp))
+                            
+                            // Custom Audio Controls
+                            AndroidView(
+                                factory = {
+                                    PlayerView(it).apply {
+                                        player = exoPlayer
+                                        useController = true
+                                        controllerShowTimeoutMs = 0
+                                        controllerHideOnTouch = false
+                                        // Hide the video surface for audio
+                                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth().height(120.dp)
+                            )
+                        }
+                    }
                     
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
                     ) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        Icon(
+                            Icons.Default.Close, 
+                            contentDescription = "Close", 
+                            tint = if (isVideo) Color.White else MaterialTheme.colorScheme.onBackground
+                        )
                     }
                 }
             }
