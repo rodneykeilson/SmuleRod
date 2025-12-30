@@ -1,0 +1,36 @@
+# Gradle files
+.gradle/
+build/
+/*/build/
+
+# IntelliJ/Android Studio files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Local configuration
+local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Android specific
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Gradle Wrapper (optional to ignore, but often ignored in small projects)
+# .gradle
+# gradle-app.setting
+# !gradle-wrapper.jar
+
+# Log files
+*.log
+
+# Backup files
+*.bak
+*.swp
+*~
+
