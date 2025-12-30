@@ -61,6 +61,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.PlayerControlView
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
 import coil.request.ImageRequest
@@ -745,19 +746,16 @@ class MainActivity : ComponentActivity() {
                             
                             Spacer(modifier = Modifier.height(48.dp))
                             
-                            // Custom Audio Controls
+                            // Proper Audio Controls
                             AndroidView(
                                 factory = {
-                                    PlayerView(it).apply {
+                                    PlayerControlView(it).apply {
                                         player = exoPlayer
-                                        useController = true
-                                        controllerShowTimeoutMs = 0
-                                        controllerHideOnTouch = false
-                                        // Hide the video surface for audio
-                                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                        showTimeoutMs = 0 // Keep controls visible
+                                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     }
                                 },
-                                modifier = Modifier.fillMaxWidth().height(120.dp)
+                                modifier = Modifier.fillMaxWidth().height(100.dp)
                             )
                         }
                     }
