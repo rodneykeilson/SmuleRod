@@ -629,9 +629,17 @@ class MainActivity : ComponentActivity() {
             // Strategy 4: Aggressive Regex on the whole HTML
             if (streamUrl.isBlank()) {
                 android.util.Log.d("SmuleRodDebug", "Strategy 4 - Aggressive Regex on main HTML")
-                val match = Regex("\"stream_url\":\"(.*?)\"").find(mainHtml)
+                val match = Regex("\"(?:stream_url|media_url)\":\"(.*?)\"").find(mainHtml)
                 streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
                 android.util.Log.d("SmuleRodDebug", "Strategy 4 - StreamUrl: $streamUrl")
+            }
+
+            // Strategy 5: Search for any mp4/m4a link in the HTML
+            if (streamUrl.isBlank()) {
+                android.util.Log.d("SmuleRodDebug", "Strategy 5 - Searching for any media link")
+                val match = Regex("https?://[^\"]+?\\.(?:mp4|m4a)[^\"]*").find(mainHtml)
+                streamUrl = match?.value ?: ""
+                android.util.Log.d("SmuleRodDebug", "Strategy 5 - StreamUrl: $streamUrl")
             }
 
             if (streamUrl.isBlank()) {
