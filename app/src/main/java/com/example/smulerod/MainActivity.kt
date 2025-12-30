@@ -1,8 +1,8 @@
 package com.example.smulerod
 
 import android.Manifest
-import android.app.DownloadManager
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -18,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -71,8 +72,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import java.io.File
+import java.io.FileOutputStream
 
-data class SmuleMedia(val title: String, val url: String)
+data class SmuleMedia(val title: String, val url: String, val isVideo: Boolean)
 data class DownloadedFile(val id: Long, val name: String, val uri: Uri, val size: String, val date: Long)
 
 class MainActivity : ComponentActivity() {
@@ -246,12 +248,21 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun HomeContent(initialUrl: String, snackbarHostState: SnackbarHostState) {
         var url by remember { mutableStateOf(initialUrl) }
-        var isLoading by remember { mutableStateOf(false) }
+        var isExtracting by remember { mutableStateOf(false) }
+        var isDownloading by remember { mutableStateOf(false) }
         var statusText by remember { mutableStateOf("") }
-        var downloadStarted by remember { mutableStateOf(false) }
+        var downloadProgress by remember { mutableStateOf(0f) }
+        var downloadedBytes by remember { mutableStateOf(0L) }
+        var totalBytes by remember { mutableStateOf(0L) }
+        var downloadComplete by remember { mutableStateOf(false) }
+        var mediaType by remember { mutableStateOf("") } // "Video" or "Audio"
         val scope = rememberCoroutineScope()
         val keyboardController = LocalSoftwareKeyboardController.current
         val clipboardManager = LocalClipboardManager.current
+        val context = LocalContext.current
+        
+        // Animated progress for smooth UI
+        val animatedProgress by animateFloatAsState(targetValue = downloadProgress, label = "progress")
 
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -260,15 +271,15 @@ class MainActivity : ComponentActivity() {
         ) {
             OutlinedTextField(
                 value = url,
-                onValueChange = { url = it; downloadStarted = false },
+                onValueChange = { url = it; downloadComplete = false },
                 label = { Text("Paste Smule Link") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                enabled = !isLoading,
+                enabled = !isExtracting && !isDownloading,
                 trailingIcon = {
                     IconButton(
-                        onClick = { clipboardManager.getText()?.let { url = it.text; downloadStarted = false } },
-                        enabled = !isLoading
+                        onClick = { clipboardManager.getText()?.let { url = it.text; downloadComplete = false } },
+                        enabled = !isExtracting && !isDownloading
                     ) {
                         Icon(Icons.Default.ContentPaste, contentDescription = "Paste from clipboard")
                     }
@@ -277,40 +288,99 @@ class MainActivity : ComponentActivity() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             
-            // Status indicator
-            AnimatedVisibility(visible = isLoading || downloadStarted) {
+            // Download Progress Card - Shows during extraction and download
+            AnimatedVisibility(visible = isExtracting || isDownloading || downloadComplete) {
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (downloadStarted) 
-                            MaterialTheme.colorScheme.primaryContainer 
-                        else 
-                            MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = when {
+                            downloadComplete -> MaterialTheme.colorScheme.primaryContainer
+                            isDownloading -> MaterialTheme.colorScheme.secondaryContainer
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        }
                     )
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp)
                     ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(
-                                Icons.Default.CheckCircle, 
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = if (isLoading) statusText else "Download Started!",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            if (downloadStarted && !isLoading) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            when {
+                                downloadComplete -> Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                isDownloading -> Icon(
+                                    if (mediaType == "Video") Icons.Default.VideoFile else Icons.Default.AudioFile,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                else -> CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Check your notification bar for progress",
+                                    text = when {
+                                        downloadComplete -> "Download Complete!"
+                                        isDownloading -> "Downloading $mediaType..."
+                                        else -> statusText
+                                    },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                if (isDownloading && totalBytes > 0) {
+                                    Text(
+                                        text = "${formatSize(downloadedBytes)} / ${formatSize(totalBytes)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (downloadComplete) {
+                                    Text(
+                                        text = "Check the Files tab to view",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            if (isDownloading && totalBytes > 0) {
+                                Text(
+                                    text = "${(downloadProgress * 100).toInt()}%",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        
+                        // Progress bar during download
+                        if (isDownloading) {
+                            Spacer(Modifier.height(12.dp))
+                            if (totalBytes > 0) {
+                                LinearProgressIndicator(
+                                    progress = animatedProgress,
+                                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                                )
+                            } else {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                                )
+                            }
+                            if (totalBytes == 0L) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "Downloading... (size unknown)",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -323,31 +393,55 @@ class MainActivity : ComponentActivity() {
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
-                    if (url.isNotBlank() && !isLoading) {
+                    if (url.isNotBlank() && !isExtracting && !isDownloading) {
                         keyboardController?.hide()
-                        isLoading = true
-                        downloadStarted = false
+                        isExtracting = true
+                        isDownloading = false
+                        downloadComplete = false
+                        downloadProgress = 0f
+                        downloadedBytes = 0L
+                        totalBytes = 0L
                         statusText = "Connecting to Smule..."
                         scope.launch {
                             statusText = "Extracting media info..."
                             val media = fetchMediaInfo(url)
                             if (media != null) {
+                                isExtracting = false
+                                isDownloading = true
+                                mediaType = if (media.isVideo) "Video" else "Audio"
                                 statusText = "Starting download..."
-                                startDownload(media)
-                                isLoading = false
-                                downloadStarted = true
-                                url = "" // Clear the URL after successful start
+                                
+                                // Download with progress tracking
+                                val success = downloadWithProgress(
+                                    context = context,
+                                    media = media,
+                                    onProgress = { downloaded, total ->
+                                        downloadedBytes = downloaded
+                                        totalBytes = total
+                                        if (total > 0) {
+                                            downloadProgress = downloaded.toFloat() / total.toFloat()
+                                        }
+                                    }
+                                )
+                                
+                                isDownloading = false
+                                if (success) {
+                                    downloadComplete = true
+                                    url = "" // Clear the URL after successful download
+                                } else {
+                                    snackbarHostState.showSnackbar("Download failed. Please try again.")
+                                }
                             } else {
-                                isLoading = false
+                                isExtracting = false
                                 snackbarHostState.showSnackbar("Failed to extract media. Please check the link.")
                             }
                         }
                     }
                 },
-                enabled = !isLoading && url.isNotBlank(),
+                enabled = !isExtracting && !isDownloading && url.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
-                if (isLoading) {
+                if (isExtracting || isDownloading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp), 
                         strokeWidth = 3.dp,
@@ -689,7 +783,57 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.d("SmuleRodDebug", "Final MP4 URL: $finalUrl")
                 
                 if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo")) {
-                    return@withContext SmuleMedia(title, finalUrl)
+                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
+                }
+            }
+            
+            // Try visualizer_media_url for visualizer-type performances (music videos with effects)
+            val visualizerMatch = Regex("\"visualizer_media_url\":\"([^\"]+)\"").find(mainHtml)
+            val encryptedVisualizerUrl = visualizerMatch?.groupValues?.get(1) ?: ""
+            android.util.Log.d("SmuleRodDebug", "Encrypted Visualizer URL: $encryptedVisualizerUrl")
+            
+            if (encryptedVisualizerUrl.isNotBlank()) {
+                val encodedVisualizer = java.net.URLEncoder.encode(encryptedVisualizerUrl, "UTF-8")
+                val timestamp = System.currentTimeMillis() / 1000
+                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedVisualizer"
+                android.util.Log.d("SmuleRodDebug", "Visualizer Redir URL: $redirUrl")
+                
+                val redirRequest = Request.Builder()
+                    .url(redirUrl)
+                    .header("User-Agent", desktopUserAgent)
+                    .build()
+                
+                val redirResponse = client.newCall(redirRequest).execute()
+                val finalUrl = redirResponse.request.url.toString()
+                android.util.Log.d("SmuleRodDebug", "Final Visualizer URL: $finalUrl")
+                
+                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
+                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
+                }
+            }
+            
+            // Try video_media_url (another video field some performances use)
+            val videoMediaMatch = Regex("\"video_media_url\":\"([^\"]+)\"").find(mainHtml)
+            val encryptedVideoMediaUrl = videoMediaMatch?.groupValues?.get(1) ?: ""
+            android.util.Log.d("SmuleRodDebug", "Encrypted Video Media URL: $encryptedVideoMediaUrl")
+            
+            if (encryptedVideoMediaUrl.isNotBlank()) {
+                val encodedVideoMedia = java.net.URLEncoder.encode(encryptedVideoMediaUrl, "UTF-8")
+                val timestamp = System.currentTimeMillis() / 1000
+                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedVideoMedia"
+                android.util.Log.d("SmuleRodDebug", "Video Media Redir URL: $redirUrl")
+                
+                val redirRequest = Request.Builder()
+                    .url(redirUrl)
+                    .header("User-Agent", desktopUserAgent)
+                    .build()
+                
+                val redirResponse = client.newCall(redirRequest).execute()
+                val finalUrl = redirResponse.request.url.toString()
+                android.util.Log.d("SmuleRodDebug", "Final Video Media URL: $finalUrl")
+                
+                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
+                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
                 }
             }
             
@@ -713,7 +857,7 @@ class MainActivity : ComponentActivity() {
                 val finalUrl = redirResponse.request.url.toString()
                 android.util.Log.d("SmuleRodDebug", "Final Audio URL: $finalUrl")
                 
-                return@withContext SmuleMedia(title, finalUrl)
+                return@withContext SmuleMedia(title, finalUrl, isVideo = false)
             }
             
             android.util.Log.e("SmuleRodDebug", "No media URL found")
@@ -724,17 +868,95 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startDownload(media: SmuleMedia) {
-        val uri = Uri.parse(media.url)
-        val ext = if (media.url.contains(".mp4")) "mp4" else "m4a"
-        val fileName = "${media.title.replace(Regex("[^a-zA-Z0-9-_ ]"), "_")}.$ext"
-        
-        val request = DownloadManager.Request(uri)
-            .setTitle(media.title)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-        
-        (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+    private suspend fun downloadWithProgress(
+        context: Context,
+        media: SmuleMedia,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val ext = if (media.isVideo) "mp4" else "m4a"
+            val fileName = "${media.title.replace(Regex("[^a-zA-Z0-9-_ ]"), "_")}.$ext"
+            
+            android.util.Log.d("SmuleRodDebug", "Downloading: $fileName from ${media.url}")
+            
+            val client = OkHttpClient.Builder()
+                .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            
+            val request = Request.Builder()
+                .url(media.url)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .build()
+            
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                android.util.Log.e("SmuleRodDebug", "Download failed: ${response.code}")
+                return@withContext false
+            }
+            
+            val totalBytes = response.body?.contentLength() ?: -1L
+            android.util.Log.d("SmuleRodDebug", "Total bytes: $totalBytes")
+            
+            // Save to Downloads folder
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // For Android 10+, use MediaStore
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, if (media.isVideo) "video/mp4" else "audio/m4a")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                
+                val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri == null) {
+                    android.util.Log.e("SmuleRodDebug", "Failed to create file in MediaStore")
+                    return@withContext false
+                }
+                
+                context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                    response.body?.byteStream()?.use { inputStream ->
+                        val buffer = ByteArray(8192)
+                        var bytesRead: Int
+                        var downloadedBytes = 0L
+                        
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            downloadedBytes += bytesRead
+                            withContext(Dispatchers.Main) {
+                                onProgress(downloadedBytes, if (totalBytes > 0) totalBytes else downloadedBytes)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // For older Android versions
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val file = File(downloadsDir, fileName)
+                
+                FileOutputStream(file).use { outputStream ->
+                    response.body?.byteStream()?.use { inputStream ->
+                        val buffer = ByteArray(8192)
+                        var bytesRead: Int
+                        var downloadedBytes = 0L
+                        
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            downloadedBytes += bytesRead
+                            withContext(Dispatchers.Main) {
+                                onProgress(downloadedBytes, if (totalBytes > 0) totalBytes else downloadedBytes)
+                            }
+                        }
+                    }
+                }
+            }
+            
+            android.util.Log.d("SmuleRodDebug", "Download complete: $fileName")
+            return@withContext true
+        } catch (e: Exception) {
+            android.util.Log.e("SmuleRodDebug", "Download error: ${e.message}", e)
+            false
+        }
     }
 
     private suspend fun loadDownloadedFiles(context: Context): List<DownloadedFile> = withContext(Dispatchers.IO) {
