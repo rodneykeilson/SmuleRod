@@ -247,6 +247,8 @@ class MainActivity : ComponentActivity() {
     fun HomeContent(initialUrl: String, snackbarHostState: SnackbarHostState) {
         var url by remember { mutableStateOf(initialUrl) }
         var isLoading by remember { mutableStateOf(false) }
+        var statusText by remember { mutableStateOf("") }
+        var downloadStarted by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         val keyboardController = LocalSoftwareKeyboardController.current
         val clipboardManager = LocalClipboardManager.current
@@ -258,42 +260,101 @@ class MainActivity : ComponentActivity() {
         ) {
             OutlinedTextField(
                 value = url,
-                onValueChange = { url = it },
+                onValueChange = { url = it; downloadStarted = false },
                 label = { Text("Paste Smule Link") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
+                enabled = !isLoading,
                 trailingIcon = {
-                    IconButton(onClick = {
-                        clipboardManager.getText()?.let { url = it.text }
-                    }) {
+                    IconButton(
+                        onClick = { clipboardManager.getText()?.let { url = it.text; downloadStarted = false } },
+                        enabled = !isLoading
+                    ) {
                         Icon(Icons.Default.ContentPaste, contentDescription = "Paste from clipboard")
                     }
                 },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done)
             )
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Status indicator
+            AnimatedVisibility(visible = isLoading || downloadStarted) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (downloadStarted) 
+                            MaterialTheme.colorScheme.primaryContainer 
+                        else 
+                            MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                Icons.Default.CheckCircle, 
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = if (isLoading) statusText else "Download Started!",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            if (downloadStarted && !isLoading) {
+                                Text(
+                                    text = "Check your notification bar for progress",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
-                    if (url.isNotBlank()) {
+                    if (url.isNotBlank() && !isLoading) {
                         keyboardController?.hide()
                         isLoading = true
+                        downloadStarted = false
+                        statusText = "Connecting to Smule..."
                         scope.launch {
+                            statusText = "Extracting media info..."
                             val media = fetchMediaInfo(url)
-                            isLoading = false
                             if (media != null) {
+                                statusText = "Starting download..."
                                 startDownload(media)
-                                snackbarHostState.showSnackbar("Downloading: ${media.title}")
+                                isLoading = false
+                                downloadStarted = true
+                                url = "" // Clear the URL after successful start
                             } else {
-                                snackbarHostState.showSnackbar("Failed to extract media")
+                                isLoading = false
+                                snackbarHostState.showSnackbar("Failed to extract media. Please check the link.")
                             }
                         }
                     }
                 },
-                enabled = !isLoading,
+                enabled = !isLoading && url.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
                 if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp)
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp), 
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Processing...")
                 } else {
                     Icon(Icons.Default.Download, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
@@ -559,109 +620,107 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
             android.util.Log.d("SmuleRodDebug", "Starting extraction for: $smuleUrl")
+            
             var cleanUrl = smuleUrl.trim()
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
                 cleanUrl = "https://$cleanUrl"
             }
             
             val uri = Uri.parse(cleanUrl)
-            val path = uri.path ?: run {
-                android.util.Log.e("SmuleRodDebug", "Failed to parse path from $cleanUrl")
+            val path = uri.path
+            if (path.isNullOrBlank()) {
+                android.util.Log.e("SmuleRodDebug", "Failed to parse path from: $cleanUrl")
                 return@withContext null
             }
+            
             val baseHost = if (uri.host?.contains("smule.com") == true) uri.host else "www.smule.com"
             val finalBaseUrl = "https://$baseHost$path"
+            
             android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
             
             val client = OkHttpClient.Builder()
+                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .build()
             
-            // Strategy 1: Try the main page first
+            val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            
+            // Fetch the main page to get the embedded JSON data
+            android.util.Log.d("SmuleRodDebug", "Fetching main page")
             val mainRequest = Request.Builder()
                 .url(finalBaseUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
+                .header("User-Agent", desktopUserAgent)
                 .build()
             
             val mainResponse = client.newCall(mainRequest).execute()
-            val mainHtml = mainResponse.body?.string() ?: ""
-            android.util.Log.d("SmuleRodDebug", "Main Page HTML Length: ${mainHtml.length}")
-            
-            var doc = Jsoup.parse(mainHtml)
-            var title = doc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
-            var streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
-            
-            android.util.Log.d("SmuleRodDebug", "Strategy 1 - Title: $title, StreamUrl: $streamUrl")
-            
-            // Strategy 2: Try /twitter endpoint if main page fails
-            if (streamUrl.isBlank()) {
-                val twitterUrl = "${finalBaseUrl.trimEnd('/')}/twitter"
-                android.util.Log.d("SmuleRodDebug", "Strategy 2 - Trying: $twitterUrl")
-                val twitterRequest = Request.Builder()
-                    .url(twitterUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
-                    .build()
-                val twitterResponse = client.newCall(twitterRequest).execute()
-                val twitterHtml = twitterResponse.body?.string() ?: ""
-                android.util.Log.d("SmuleRodDebug", "Twitter Page HTML Length: ${twitterHtml.length}")
-                doc = Jsoup.parse(twitterHtml)
-                streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
-                android.util.Log.d("SmuleRodDebug", "Strategy 2 - StreamUrl: $streamUrl")
-            }
-
-            // Strategy 3: Look for JSON data in script tags
-            if (streamUrl.isBlank()) {
-                android.util.Log.d("SmuleRodDebug", "Strategy 3 - Searching script tags")
-                val scriptTags = doc.select("script")
-                for (script in scriptTags) {
-                    val data = script.data()
-                    if (data.contains("stream_url")) {
-                        val match = Regex("\"stream_url\":\"(.*?)\"").find(data)
-                        streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
-                        if (streamUrl.isNotBlank()) {
-                            android.util.Log.d("SmuleRodDebug", "Strategy 3 - Found in script: $streamUrl")
-                            break
-                        }
-                    }
-                }
-            }
-
-            // Strategy 4: Aggressive Regex on the whole HTML
-            if (streamUrl.isBlank()) {
-                android.util.Log.d("SmuleRodDebug", "Strategy 4 - Aggressive Regex on main HTML")
-                val match = Regex("\"(?:stream_url|media_url)\":\"(.*?)\"").find(mainHtml)
-                streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
-                android.util.Log.d("SmuleRodDebug", "Strategy 4 - StreamUrl: $streamUrl")
-            }
-
-            // Strategy 5: Search for any mp4/m4a link in the HTML
-            if (streamUrl.isBlank()) {
-                android.util.Log.d("SmuleRodDebug", "Strategy 5 - Searching for any media link")
-                val match = Regex("https?://[^\"]+?\\.(?:mp4|m4a)[^\"]*").find(mainHtml)
-                streamUrl = match?.value ?: ""
-                android.util.Log.d("SmuleRodDebug", "Strategy 5 - StreamUrl: $streamUrl")
-            }
-
-            if (streamUrl.isBlank()) {
-                android.util.Log.e("SmuleRodDebug", "All strategies failed to find streamUrl")
+            if (!mainResponse.isSuccessful) {
+                android.util.Log.e("SmuleRodDebug", "Main page failed: ${mainResponse.code}")
                 return@withContext null
             }
-
-            // Follow the stream URL to get the final media link
-            android.util.Log.d("SmuleRodDebug", "Following streamUrl: $streamUrl")
-            var finalUrl = streamUrl
-            try {
-                val redirResponse = client.newCall(Request.Builder().url(streamUrl).head().build()).execute()
-                finalUrl = redirResponse.request.url.toString()
-            } catch (e: Exception) {
-                android.util.Log.w("SmuleRodDebug", "Head request failed, using streamUrl directly", e)
-            }
-            android.util.Log.d("SmuleRodDebug", "Final Media URL: $finalUrl")
             
-            return@withContext SmuleMedia(title, finalUrl)
-        } catch (e: Exception) { 
-            android.util.Log.e("SmuleRodDebug", "Extraction error", e)
-            null 
+            val mainHtml = mainResponse.body?.string() ?: ""
+            android.util.Log.d("SmuleRodDebug", "Main page HTML length: ${mainHtml.length}")
+            
+            val mainDoc = Jsoup.parse(mainHtml)
+            val title = mainDoc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
+            android.util.Log.d("SmuleRodDebug", "Title: $title")
+            
+            // Extract the encrypted video_media_mp4_url from the embedded JavaScript
+            val mp4Match = Regex("\"video_media_mp4_url\":\"([^\"]+)\"").find(mainHtml)
+            val encryptedMp4Url = mp4Match?.groupValues?.get(1) ?: ""
+            android.util.Log.d("SmuleRodDebug", "Encrypted MP4 URL: $encryptedMp4Url")
+            
+            // If we found an MP4 URL, use the /redir endpoint to get the actual URL
+            if (encryptedMp4Url.isNotBlank()) {
+                val encodedMp4 = java.net.URLEncoder.encode(encryptedMp4Url, "UTF-8")
+                val timestamp = System.currentTimeMillis() / 1000
+                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedMp4"
+                android.util.Log.d("SmuleRodDebug", "Redir URL: $redirUrl")
+                
+                val redirRequest = Request.Builder()
+                    .url(redirUrl)
+                    .header("User-Agent", desktopUserAgent)
+                    .build()
+                
+                val redirResponse = client.newCall(redirRequest).execute()
+                val finalUrl = redirResponse.request.url.toString()
+                android.util.Log.d("SmuleRodDebug", "Final MP4 URL: $finalUrl")
+                
+                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo")) {
+                    return@withContext SmuleMedia(title, finalUrl)
+                }
+            }
+            
+            // Fallback: Try to get audio URL (media_url) if video fails
+            val audioMatch = Regex("\"media_url\":\"([^\"]+)\"").find(mainHtml)
+            val encryptedAudioUrl = audioMatch?.groupValues?.get(1) ?: ""
+            android.util.Log.d("SmuleRodDebug", "Encrypted Audio URL: $encryptedAudioUrl")
+            
+            if (encryptedAudioUrl.isNotBlank()) {
+                val encodedAudio = java.net.URLEncoder.encode(encryptedAudioUrl, "UTF-8")
+                val timestamp = System.currentTimeMillis() / 1000
+                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedAudio"
+                android.util.Log.d("SmuleRodDebug", "Audio Redir URL: $redirUrl")
+                
+                val redirRequest = Request.Builder()
+                    .url(redirUrl)
+                    .header("User-Agent", desktopUserAgent)
+                    .build()
+                
+                val redirResponse = client.newCall(redirRequest).execute()
+                val finalUrl = redirResponse.request.url.toString()
+                android.util.Log.d("SmuleRodDebug", "Final Audio URL: $finalUrl")
+                
+                return@withContext SmuleMedia(title, finalUrl)
+            }
+            
+            android.util.Log.e("SmuleRodDebug", "No media URL found")
+            return@withContext null
+        } catch (e: Exception) {
+            android.util.Log.e("SmuleRodDebug", "Extraction error: ${e.message}", e)
+            null
         }
     }
 
