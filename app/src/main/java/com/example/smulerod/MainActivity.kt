@@ -649,8 +649,13 @@ class MainActivity : ComponentActivity() {
 
             // Follow the stream URL to get the final media link
             android.util.Log.d("SmuleRodDebug", "Following streamUrl: $streamUrl")
-            val redirResponse = client.newCall(Request.Builder().url(streamUrl).head().build()).execute()
-            val finalUrl = redirResponse.request.url.toString()
+            var finalUrl = streamUrl
+            try {
+                val redirResponse = client.newCall(Request.Builder().url(streamUrl).head().build()).execute()
+                finalUrl = redirResponse.request.url.toString()
+            } catch (e: Exception) {
+                android.util.Log.w("SmuleRodDebug", "Head request failed, using streamUrl directly", e)
+            }
             android.util.Log.d("SmuleRodDebug", "Final Media URL: $finalUrl")
             
             return@withContext SmuleMedia(title, finalUrl)
