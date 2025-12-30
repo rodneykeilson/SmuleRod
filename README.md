@@ -1,31 +1,41 @@
-# Smule Downloader (Minimalist Android App)
+# <img src="app/src/main/res/drawable/app_logo.jpg" width="48" height="48"> SmuleRod
 
-A minimalist Android application to download Smule videos and audio from links.
+[![Android CI/CD](https://github.com/${{ github.repository }}/actions/workflows/android.yml/badge.svg)](https://github.com/${{ github.repository }}/actions/workflows/android.yml)
+
+A minimalist, high-accessibility Android application to download Smule videos and audio with a built-in player.
 
 ## Features
-- Simple, clean UI using Jetpack Compose.
-- Extracts direct MP4/M4A links from Smule recording URLs.
-- Supports "Share to" functionality (share a link from the Smule app directly to this app).
-- Uses Android's native `DownloadManager` for reliable downloads.
-
-## How to Build
-1. Open this folder in **Android Studio**.
-2. Wait for Gradle to sync.
-3. Connect your Android device or start an emulator.
-4. Click **Run** (Shift + F10).
+- **Minimalist UI**: Clean Jetpack Compose interface.
+- **WCAG AAA Compliant**: High contrast and accessible touch targets.
+- **Built-in Player**: Watch videos directly inside the app.
+- **Video Previews**: See thumbnails of your downloads.
+- **Multi-select**: Bulk delete or share your recordings.
+- **Theme Support**: Quick toggle between Light and Dark modes.
+- **Share Integration**: Share a link from the Smule app directly to SmuleRod.
 
 ## How to Use
-1. Copy a Smule recording link (e.g., `https://www.smule.com/recording/...`).
-2. Paste it into the app and click **Download**.
-3. Alternatively, in the Smule app, click **Share** -> **More** -> **Smule Downloader**.
+1. **Download**: Copy a Smule link or share it directly to SmuleRod.
+2. **Manage**: Go to the **Files** tab to view, play, or share your downloads.
+3. **Multi-select**: Tap the checklist icon in the Files tab to select multiple files for bulk actions.
+
+## How to Build
+1. Clone the repository.
+2. Open in **Android Studio**.
+3. Build and run on your device.
+
+## CI/CD & Releases
+- **Automated Builds**: Every push to `main` triggers a build check.
+- **Releases**: To create a formal release with an APK, simply push a tag:
+  ```bash
+  git tag v1.0.0
+  git push --tags
+  ```
+  The APK will be automatically attached to the GitHub Release.
 
 ## Technical Details
 - **Language**: Kotlin
-- **UI Framework**: Jetpack Compose
-- **Networking**: OkHttp
-- **HTML Parsing**: Jsoup
-- **Minimum SDK**: 24 (Android 7.0)
+- **UI**: Jetpack Compose (Material 3)
+- **Media**: Media3 ExoPlayer & Coil Video Decoding
+- **Min SDK**: 24 (Android 7.0)
 - **Target SDK**: 34 (Android 14)
 
-## Example Link for Testing
-`https://www.smule.com/recording/noah-menghapus-jejakmu/1411828004_2871525322`
