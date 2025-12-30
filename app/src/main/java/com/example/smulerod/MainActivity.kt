@@ -558,21 +558,26 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
+            android.util.Log.d("SmuleRodDebug", "Starting extraction for: $smuleUrl")
             var cleanUrl = smuleUrl.trim()
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
                 cleanUrl = "https://$cleanUrl"
             }
             
             val uri = Uri.parse(cleanUrl)
-            val path = uri.path ?: return@withContext null
+            val path = uri.path ?: run {
+                android.util.Log.e("SmuleRodDebug", "Failed to parse path from $cleanUrl")
+                return@withContext null
+            }
             val baseHost = if (uri.host?.contains("smule.com") == true) uri.host else "www.smule.com"
             val finalBaseUrl = "https://$baseHost$path"
+            android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
             
             val client = OkHttpClient.Builder()
                 .followRedirects(true)
                 .build()
             
-            // Strategy 1: Try the main page first (often contains the meta tags directly)
+            // Strategy 1: Try the main page first
             val mainRequest = Request.Builder()
                 .url(finalBaseUrl)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
@@ -580,46 +585,69 @@ class MainActivity : ComponentActivity() {
             
             val mainResponse = client.newCall(mainRequest).execute()
             val mainHtml = mainResponse.body?.string() ?: ""
-            var doc = Jsoup.parse(mainHtml)
+            android.util.Log.d("SmuleRodDebug", "Main Page HTML Length: ${mainHtml.length}")
             
+            var doc = Jsoup.parse(mainHtml)
             var title = doc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
             var streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
+            
+            android.util.Log.d("SmuleRodDebug", "Strategy 1 - Title: $title, StreamUrl: $streamUrl")
             
             // Strategy 2: Try /twitter endpoint if main page fails
             if (streamUrl.isBlank()) {
                 val twitterUrl = "${finalBaseUrl.trimEnd('/')}/twitter"
+                android.util.Log.d("SmuleRodDebug", "Strategy 2 - Trying: $twitterUrl")
                 val twitterRequest = Request.Builder()
                     .url(twitterUrl)
                     .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36")
                     .build()
                 val twitterResponse = client.newCall(twitterRequest).execute()
                 val twitterHtml = twitterResponse.body?.string() ?: ""
+                android.util.Log.d("SmuleRodDebug", "Twitter Page HTML Length: ${twitterHtml.length}")
                 doc = Jsoup.parse(twitterHtml)
                 streamUrl = doc.select("meta[name=twitter:player:stream]").attr("content")
+                android.util.Log.d("SmuleRodDebug", "Strategy 2 - StreamUrl: $streamUrl")
             }
 
-            // Strategy 3: Look for JSON data in the page (Smule often embeds state in a script tag)
+            // Strategy 3: Look for JSON data in script tags
             if (streamUrl.isBlank()) {
+                android.util.Log.d("SmuleRodDebug", "Strategy 3 - Searching script tags")
                 val scriptTags = doc.select("script")
                 for (script in scriptTags) {
                     val data = script.data()
                     if (data.contains("stream_url")) {
                         val match = Regex("\"stream_url\":\"(.*?)\"").find(data)
                         streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
-                        if (streamUrl.isNotBlank()) break
+                        if (streamUrl.isNotBlank()) {
+                            android.util.Log.d("SmuleRodDebug", "Strategy 3 - Found in script: $streamUrl")
+                            break
+                        }
                     }
                 }
             }
 
-            if (streamUrl.isBlank()) return@withContext null
+            // Strategy 4: Aggressive Regex on the whole HTML
+            if (streamUrl.isBlank()) {
+                android.util.Log.d("SmuleRodDebug", "Strategy 4 - Aggressive Regex on main HTML")
+                val match = Regex("\"stream_url\":\"(.*?)\"").find(mainHtml)
+                streamUrl = match?.groupValues?.get(1)?.replace("\\u002F", "/") ?: ""
+                android.util.Log.d("SmuleRodDebug", "Strategy 4 - StreamUrl: $streamUrl")
+            }
+
+            if (streamUrl.isBlank()) {
+                android.util.Log.e("SmuleRodDebug", "All strategies failed to find streamUrl")
+                return@withContext null
+            }
 
             // Follow the stream URL to get the final media link
+            android.util.Log.d("SmuleRodDebug", "Following streamUrl: $streamUrl")
             val redirResponse = client.newCall(Request.Builder().url(streamUrl).head().build()).execute()
             val finalUrl = redirResponse.request.url.toString()
+            android.util.Log.d("SmuleRodDebug", "Final Media URL: $finalUrl")
             
             return@withContext SmuleMedia(title, finalUrl)
         } catch (e: Exception) { 
-            e.printStackTrace()
+            android.util.Log.e("SmuleRodDebug", "Extraction error", e)
             null 
         }
     }
