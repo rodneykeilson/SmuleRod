@@ -891,20 +891,60 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun fetchPageWithWebView(url: String): String = withContext(Dispatchers.Main) {
         var html = ""
+        var lastHtmlLength = 0
+        var stableCount = 0
         val latch = java.util.concurrent.CountDownLatch(1)
         
         val webView = WebView(this@MainActivity).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = USER_AGENT
+            settings.cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
             
             webViewClient = object : WebViewClient() {
+                private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                private var checkRunnable: Runnable? = null
+                
                 override fun onPageFinished(view: WebView, url: String) {
-                    view.evaluateJavascript("document.documentElement.outerHTML") { result ->
-                        html = result?.trim('"')?.replace("\\u003C", "<")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\/", "/") ?: ""
-                        android.util.Log.d("SmuleRodDebug", "WebView HTML length: ${html.length}")
-                        latch.countDown()
+                    android.util.Log.d("SmuleRodDebug", "WebView onPageFinished: $url")
+                    
+                    // Start checking for content stability (Cloudflare challenge completion)
+                    checkRunnable = object : Runnable {
+                        override fun run() {
+                            view.evaluateJavascript("document.documentElement.outerHTML") { result ->
+                                val currentHtml = result?.trim('"')?.replace("\\u003C", "<")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\/", "/") ?: ""
+                                val currentLength = currentHtml.length
+                                
+                                android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes (prev: $lastHtmlLength)")
+                                
+                                // Check if page has actual content (>10KB suggests real page loaded)
+                                if (currentLength > 10000) {
+                                    html = currentHtml
+                                    android.util.Log.d("SmuleRodDebug", "WebView content loaded successfully")
+                                    latch.countDown()
+                                    return@evaluateJavascript
+                                }
+                                
+                                // If size is stable for 3 checks and >1KB, assume it's done (might be error page)
+                                if (currentLength == lastHtmlLength && currentLength > 1000) {
+                                    stableCount++
+                                    if (stableCount >= 3) {
+                                        html = currentHtml
+                                        android.util.Log.d("SmuleRodDebug", "WebView content stable at $currentLength bytes")
+                                        latch.countDown()
+                                        return@evaluateJavascript
+                                    }
+                                } else {
+                                    stableCount = 0
+                                    lastHtmlLength = currentLength
+                                }
+                                
+                                // Keep checking every 500ms
+                                handler.postDelayed(this, 500)
+                            }
+                        }
                     }
+                    handler.postDelayed(checkRunnable!!, 1000) // Start checking after 1s
                 }
             }
         }
