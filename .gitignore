@@ -2,6 +2,7 @@
 .gradle/
 build/
 /*/build/
+copilot-instructions.md
 
 # IntelliJ/Android Studio files
 .idea/
