@@ -897,6 +897,42 @@ class MainActivity : ComponentActivity() {
         }
         return this
     }
+    
+    /**
+     * Resolves an encrypted Smule URL via the /redir endpoint.
+     * Returns the final CDN URL or null if resolution fails.
+     */
+    private fun resolveSmuleUrl(encryptedUrl: String, referer: String): String? {
+        if (encryptedUrl.isBlank()) return null
+        
+        val encodedUrl = java.net.URLEncoder.encode(encryptedUrl, "UTF-8")
+        val timestamp = System.currentTimeMillis() / 1000
+        val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedUrl"
+        
+        android.util.Log.d("SmuleRodDebug", "Resolving redir URL: $redirUrl")
+        
+        val redirRequest = Request.Builder()
+            .url(redirUrl)
+            .addCommonHeaders(referer)
+            .build()
+        
+        return try {
+            val redirResponse = client.newCall(redirRequest).execute()
+            val finalUrl = redirResponse.request.url.toString()
+            android.util.Log.d("SmuleRodDebug", "Resolved to: $finalUrl")
+            
+            // Check if we got a valid CDN URL (not still on smule.com/redir)
+            if (finalUrl.contains("cdn.smule.com") && !finalUrl.contains("/redir")) {
+                finalUrl
+            } else {
+                android.util.Log.w("SmuleRodDebug", "Resolution failed, got: $finalUrl")
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SmuleRodDebug", "Resolution error: ${e.message}")
+            null
+        }
+    }
 
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
@@ -947,106 +983,76 @@ class MainActivity : ComponentActivity() {
             val title = mainDoc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
             android.util.Log.d("SmuleRodDebug", "Title: $title")
             
-            // Extract the encrypted video_media_mp4_url from the embedded JavaScript
-            val mp4Match = Regex("\"video_media_mp4_url\":\"([^\"]+)\"").find(mainHtml)
-            val encryptedMp4Url = mp4Match?.groupValues?.get(1) ?: ""
-            android.util.Log.d("SmuleRodDebug", "Encrypted MP4 URL: $encryptedMp4Url")
+            // Detect performance type from the JSON
+            val typeMatch = Regex("\"type\":\"([^\"]+)\"").find(mainHtml)
+            val performanceType = typeMatch?.groupValues?.get(1) ?: "unknown"
+            val isVideoPerformance = performanceType == "video"
+            android.util.Log.d("SmuleRodDebug", "Performance type: $performanceType, isVideo: $isVideoPerformance")
             
-            // If we found an MP4 URL, use the /redir endpoint to get the actual URL
-            if (encryptedMp4Url.isNotBlank()) {
-                val encodedMp4 = java.net.URLEncoder.encode(encryptedMp4Url, "UTF-8")
-                val timestamp = System.currentTimeMillis() / 1000
-                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedMp4"
-                android.util.Log.d("SmuleRodDebug", "Redir URL: $redirUrl")
+            // Extract all potential media URLs upfront
+            val mp4UrlMatch = Regex("\"video_media_mp4_url\":\"([^\"]+)\"").find(mainHtml)
+            val videoUrlMatch = Regex("\"video_media_url\":\"([^\"]+)\"").find(mainHtml)
+            val visualizerUrlMatch = Regex("\"visualizer_media_url\":\"([^\"]+)\"").find(mainHtml)
+            val mediaUrlMatch = Regex("\"media_url\":\"([^\"]+)\"").find(mainHtml)
+            
+            val encryptedMp4 = mp4UrlMatch?.groupValues?.get(1) ?: ""
+            val encryptedVideo = videoUrlMatch?.groupValues?.get(1) ?: ""
+            val encryptedVisualizer = visualizerUrlMatch?.groupValues?.get(1) ?: ""
+            val encryptedMedia = mediaUrlMatch?.groupValues?.get(1) ?: ""
+            
+            android.util.Log.d("SmuleRodDebug", "Found URLs - MP4: ${encryptedMp4.take(30)}, Video: ${encryptedVideo.take(30)}, Visualizer: ${encryptedVisualizer.take(30)}, Media: ${encryptedMedia.take(30)}")
+            
+            // Priority order for video: video_media_mp4_url > video_media_url > visualizer_media_url
+            // For audio-only: media_url
+            
+            if (isVideoPerformance) {
+                // Try video_media_mp4_url first (best quality)
+                if (encryptedMp4.isNotBlank()) {
+                    val resolvedUrl = resolveSmuleUrl(encryptedMp4, finalBaseUrl)
+                    if (resolvedUrl != null) {
+                        android.util.Log.d("SmuleRodDebug", "Returning MP4 video: $resolvedUrl")
+                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
+                    }
+                }
                 
-                val redirRequest = Request.Builder()
-                    .url(redirUrl)
-                    .addCommonHeaders(finalBaseUrl)
-                    .build()
+                // Try video_media_url
+                if (encryptedVideo.isNotBlank()) {
+                    val resolvedUrl = resolveSmuleUrl(encryptedVideo, finalBaseUrl)
+                    if (resolvedUrl != null) {
+                        android.util.Log.d("SmuleRodDebug", "Returning video_media: $resolvedUrl")
+                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
+                    }
+                }
                 
-                val redirResponse = client.newCall(redirRequest).execute()
-                val finalUrl = redirResponse.request.url.toString()
-                android.util.Log.d("SmuleRodDebug", "Final MP4 URL: $finalUrl")
+                // Try visualizer_media_url
+                if (encryptedVisualizer.isNotBlank()) {
+                    val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, finalBaseUrl)
+                    if (resolvedUrl != null) {
+                        android.util.Log.d("SmuleRodDebug", "Returning visualizer: $resolvedUrl")
+                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
+                    }
+                }
                 
-                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
-                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
+                // Last resort for video: try media_url but still mark as video
+                if (encryptedMedia.isNotBlank()) {
+                    val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
+                    if (resolvedUrl != null) {
+                        android.util.Log.w("SmuleRodDebug", "Falling back to media_url for video performance: $resolvedUrl")
+                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
+                    }
+                }
+            } else {
+                // Audio performance - use media_url
+                if (encryptedMedia.isNotBlank()) {
+                    val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
+                    if (resolvedUrl != null) {
+                        android.util.Log.d("SmuleRodDebug", "Returning audio: $resolvedUrl")
+                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = false)
+                    }
                 }
             }
             
-            // Try visualizer_media_url for visualizer-type performances (music videos with effects)
-            val visualizerMatch = Regex("\"visualizer_media_url\":\"([^\"]+)\"").find(mainHtml)
-            val encryptedVisualizerUrl = visualizerMatch?.groupValues?.get(1) ?: ""
-            android.util.Log.d("SmuleRodDebug", "Encrypted Visualizer URL: $encryptedVisualizerUrl")
-            
-            if (encryptedVisualizerUrl.isNotBlank()) {
-                val encodedVisualizer = java.net.URLEncoder.encode(encryptedVisualizerUrl, "UTF-8")
-                val timestamp = System.currentTimeMillis() / 1000
-                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedVisualizer"
-                android.util.Log.d("SmuleRodDebug", "Visualizer Redir URL: $redirUrl")
-                
-                val redirRequest = Request.Builder()
-                    .url(redirUrl)
-                    .addCommonHeaders(finalBaseUrl)
-                    .build()
-                
-                val redirResponse = client.newCall(redirRequest).execute()
-                val finalUrl = redirResponse.request.url.toString()
-                android.util.Log.d("SmuleRodDebug", "Final Visualizer URL: $finalUrl")
-                
-                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
-                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
-                }
-            }
-            
-            // Try video_media_url (another video field some performances use)
-            val videoMediaMatch = Regex("\"video_media_url\":\"([^\"]+)\"").find(mainHtml)
-            val encryptedVideoMediaUrl = videoMediaMatch?.groupValues?.get(1) ?: ""
-            android.util.Log.d("SmuleRodDebug", "Encrypted Video Media URL: $encryptedVideoMediaUrl")
-            
-            if (encryptedVideoMediaUrl.isNotBlank()) {
-                val encodedVideoMedia = java.net.URLEncoder.encode(encryptedVideoMediaUrl, "UTF-8")
-                val timestamp = System.currentTimeMillis() / 1000
-                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedVideoMedia"
-                android.util.Log.d("SmuleRodDebug", "Video Media Redir URL: $redirUrl")
-                
-                val redirRequest = Request.Builder()
-                    .url(redirUrl)
-                    .addCommonHeaders(finalBaseUrl)
-                    .build()
-                
-                val redirResponse = client.newCall(redirRequest).execute()
-                val finalUrl = redirResponse.request.url.toString()
-                android.util.Log.d("SmuleRodDebug", "Final Video Media URL: $finalUrl")
-                
-                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
-                    return@withContext SmuleMedia(title, finalUrl, isVideo = true)
-                }
-            }
-            
-            // Fallback: Try to get audio URL (media_url or audio_media_url) if video fails
-            val audioMatch = Regex("\"(?:audio_)?media_url\":\"([^\"]+)\"").find(mainHtml)
-            val encryptedAudioUrl = audioMatch?.groupValues?.get(1) ?: ""
-            android.util.Log.d("SmuleRodDebug", "Encrypted Audio URL: $encryptedAudioUrl")
-            
-            if (encryptedAudioUrl.isNotBlank()) {
-                val encodedAudio = java.net.URLEncoder.encode(encryptedAudioUrl, "UTF-8")
-                val timestamp = System.currentTimeMillis() / 1000
-                val redirUrl = "https://www.smule.com/redir?e=1&t=$timestamp.12345&url=$encodedAudio"
-                android.util.Log.d("SmuleRodDebug", "Audio Redir URL: $redirUrl")
-                
-                val redirRequest = Request.Builder()
-                    .url(redirUrl)
-                    .addCommonHeaders(finalBaseUrl)
-                    .build()
-                
-                val redirResponse = client.newCall(redirRequest).execute()
-                val finalUrl = redirResponse.request.url.toString()
-                android.util.Log.d("SmuleRodDebug", "Final Audio URL: $finalUrl")
-                
-                return@withContext SmuleMedia(title, finalUrl, isVideo = false)
-            }
-            
-            android.util.Log.e("SmuleRodDebug", "No media URL found")
+            android.util.Log.e("SmuleRodDebug", "No media URL could be resolved")
             return@withContext null
         } catch (e: java.net.UnknownHostException) {
             android.util.Log.e("SmuleRodDebug", "DNS Error: ${e.message}")
@@ -1059,6 +1065,7 @@ class MainActivity : ComponentActivity() {
             null
         }
     }
+
 
     private suspend fun downloadWithProgress(
         context: Context,
@@ -1082,8 +1089,23 @@ class MainActivity : ComponentActivity() {
                 return@withContext false
             }
             
+            val contentType = response.header("Content-Type") ?: ""
+            android.util.Log.d("SmuleRodDebug", "Content-Type: $contentType")
+            
+            // Validate content type matches expected media type
+            val isVideoContent = contentType.contains("video") || media.url.contains("renvideo")
+            if (media.isVideo && !isVideoContent && !contentType.contains("octet-stream")) {
+                android.util.Log.w("SmuleRodDebug", "Expected video but got: $contentType")
+            }
+            
             val totalBytes = response.body?.contentLength() ?: -1L
             android.util.Log.d("SmuleRodDebug", "Total bytes: $totalBytes")
+            
+            // Validate we have a reasonable file size (at least 100KB for video)
+            if (media.isVideo && totalBytes > 0 && totalBytes < 100_000) {
+                android.util.Log.e("SmuleRodDebug", "File too small for video: $totalBytes bytes")
+                return@withContext false
+            }
             
             // Save to Downloads folder
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
