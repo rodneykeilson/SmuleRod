@@ -48,6 +48,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import okhttp3.*
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -881,6 +883,21 @@ class MainActivity : ComponentActivity() {
         return String.format("%02d:%02d", minutes, seconds)
     }
 
+    private fun Request.Builder.addCommonHeaders(referer: String? = null): Request.Builder {
+        header("User-Agent", USER_AGENT)
+        header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        header("Accept-Language", "en-US,en;q=0.9")
+        header("Sec-Fetch-Dest", "document")
+        header("Sec-Fetch-Mode", "navigate")
+        header("Sec-Fetch-Site", "same-origin")
+        header("Sec-Fetch-User", "?1")
+        header("Upgrade-Insecure-Requests", "1")
+        if (referer != null) {
+            header("Referer", referer)
+        }
+        return this
+    }
+
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
             android.util.Log.d("SmuleRodDebug", "Starting extraction for: $smuleUrl")
@@ -914,8 +931,7 @@ class MainActivity : ComponentActivity() {
             android.util.Log.d("SmuleRodDebug", "Fetching main page")
             val mainRequest = Request.Builder()
                 .url(finalBaseUrl)
-                .header("User-Agent", DESKTOP_USER_AGENT)
-                .header("Referer", "https://www.smule.com/")
+                .addCommonHeaders("https://www.smule.com/")
                 .build()
             
             val mainResponse = client.newCall(mainRequest).execute()
@@ -945,8 +961,7 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", DESKTOP_USER_AGENT)
-                    .header("Referer", finalBaseUrl)
+                    .addCommonHeaders(finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -971,8 +986,7 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", DESKTOP_USER_AGENT)
-                    .header("Referer", finalBaseUrl)
+                    .addCommonHeaders(finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -997,8 +1011,7 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", DESKTOP_USER_AGENT)
-                    .header("Referer", finalBaseUrl)
+                    .addCommonHeaders(finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -1023,8 +1036,7 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", DESKTOP_USER_AGENT)
-                    .header("Referer", finalBaseUrl)
+                    .addCommonHeaders(finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -1061,8 +1073,7 @@ class MainActivity : ComponentActivity() {
             
             val request = Request.Builder()
                 .url(media.url)
-                .header("User-Agent", DESKTOP_USER_AGENT)
-                .header("Referer", "https://www.smule.com/")
+                .addCommonHeaders("https://www.smule.com/")
                 .build()
             
             val response = client.newCall(request).execute()
@@ -1225,9 +1236,18 @@ class MainActivity : ComponentActivity() {
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
+            .cookieJar(object : CookieJar {
+                private val cookieStore = mutableMapOf<String, List<Cookie>>()
+                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                    cookieStore[url.host] = cookies
+                }
+                override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                    return cookieStore[url.host] ?: listOf()
+                }
+            })
             .build()
         
-        private const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UD1A.230805.019; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.135 Mobile Safari/537.36"
     }
 }
 
