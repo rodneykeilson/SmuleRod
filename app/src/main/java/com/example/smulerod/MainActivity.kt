@@ -887,9 +887,13 @@ class MainActivity : ComponentActivity() {
         header("User-Agent", USER_AGENT)
         header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         header("Accept-Language", "en-US,en;q=0.9")
+        header("Accept-Encoding", "gzip, deflate, br")
+        header("sec-ch-ua", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+        header("sec-ch-ua-mobile", "?1")
+        header("sec-ch-ua-platform", "\"Android\"")
         header("Sec-Fetch-Dest", "document")
         header("Sec-Fetch-Mode", "navigate")
-        header("Sec-Fetch-Site", "same-origin")
+        header("Sec-Fetch-Site", if (referer != null) "same-origin" else "none")
         header("Sec-Fetch-User", "?1")
         header("Upgrade-Insecure-Requests", "1")
         if (referer != null) {
@@ -962,7 +966,7 @@ class MainActivity : ComponentActivity() {
             // Test DNS resolution
             try {
                 val addresses = java.net.InetAddress.getAllByName("www.smule.com")
-                android.util.Log.d("SmuleRodDebug", "DNS Resolution for www.smule.com: ${addresses.joinToString { it.hostAddress }}")
+                android.util.Log.d("SmuleRodDebug", "DNS Resolution for www.smule.com: ${addresses.joinToString { it.hostAddress ?: "" }}")
             } catch (e: Exception) {
                 android.util.Log.e("SmuleRodDebug", "DNS Resolution failed: ${e.message}")
             }
@@ -983,6 +987,24 @@ class MainActivity : ComponentActivity() {
             val finalBaseUrl = "https://$baseHost$path"
             
             android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
+            
+            // First, visit the homepage to get Cloudflare cookies and establish a session
+            // This makes subsequent requests look more legitimate
+            android.util.Log.d("SmuleRodDebug", "Warming up session with homepage visit")
+            try {
+                val homepageRequest = Request.Builder()
+                    .url("https://www.smule.com/")
+                    .addCommonHeaders()
+                    .build()
+                val homepageResponse = client.newCall(homepageRequest).execute()
+                android.util.Log.d("SmuleRodDebug", "Homepage response: ${homepageResponse.code}")
+                homepageResponse.body?.close()
+                
+                // Small delay to make it look more natural
+                kotlinx.coroutines.delay(500)
+            } catch (e: Exception) {
+                android.util.Log.w("SmuleRodDebug", "Homepage warmup failed: ${e.message}")
+            }
             
             // Fetch the main page to get the embedded JSON data
             // We need to follow redirects manually since Smule does a 301
