@@ -885,6 +885,14 @@ class MainActivity : ComponentActivity() {
         try {
             android.util.Log.d("SmuleRodDebug", "Starting extraction for: $smuleUrl")
             
+            // Test DNS resolution
+            try {
+                val addresses = java.net.InetAddress.getAllByName("www.smule.com")
+                android.util.Log.d("SmuleRodDebug", "DNS Resolution for www.smule.com: ${addresses.joinToString { it.hostAddress }}")
+            } catch (e: Exception) {
+                android.util.Log.e("SmuleRodDebug", "DNS Resolution failed: ${e.message}")
+            }
+
             var cleanUrl = smuleUrl.trim()
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
                 cleanUrl = "https://$cleanUrl"
@@ -902,20 +910,12 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
             
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .followRedirects(true)
-                .build()
-            
-            val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            
             // Fetch the main page to get the embedded JSON data
             android.util.Log.d("SmuleRodDebug", "Fetching main page")
             val mainRequest = Request.Builder()
                 .url(finalBaseUrl)
-                .header("User-Agent", desktopUserAgent)
+                .header("User-Agent", DESKTOP_USER_AGENT)
+                .header("Referer", "https://www.smule.com/")
                 .build()
             
             val mainResponse = client.newCall(mainRequest).execute()
@@ -945,14 +945,15 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", desktopUserAgent)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .header("Referer", finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
                 val finalUrl = redirResponse.request.url.toString()
                 android.util.Log.d("SmuleRodDebug", "Final MP4 URL: $finalUrl")
                 
-                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo")) {
+                if (finalUrl.contains(".mp4") || finalUrl.contains("renvideo") || finalUrl.contains("cdn.smule.com")) {
                     return@withContext SmuleMedia(title, finalUrl, isVideo = true)
                 }
             }
@@ -970,7 +971,8 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", desktopUserAgent)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .header("Referer", finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -995,7 +997,8 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", desktopUserAgent)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .header("Referer", finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -1007,8 +1010,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
-            // Fallback: Try to get audio URL (media_url) if video fails
-            val audioMatch = Regex("\"media_url\":\"([^\"]+)\"").find(mainHtml)
+            // Fallback: Try to get audio URL (media_url or audio_media_url) if video fails
+            val audioMatch = Regex("\"(?:audio_)?media_url\":\"([^\"]+)\"").find(mainHtml)
             val encryptedAudioUrl = audioMatch?.groupValues?.get(1) ?: ""
             android.util.Log.d("SmuleRodDebug", "Encrypted Audio URL: $encryptedAudioUrl")
             
@@ -1020,7 +1023,8 @@ class MainActivity : ComponentActivity() {
                 
                 val redirRequest = Request.Builder()
                     .url(redirUrl)
-                    .header("User-Agent", desktopUserAgent)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .header("Referer", finalBaseUrl)
                     .build()
                 
                 val redirResponse = client.newCall(redirRequest).execute()
@@ -1032,6 +1036,12 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.e("SmuleRodDebug", "No media URL found")
             return@withContext null
+        } catch (e: java.net.UnknownHostException) {
+            android.util.Log.e("SmuleRodDebug", "DNS Error: ${e.message}")
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Network error: Could not resolve Smule. Check your connection.", Toast.LENGTH_LONG).show()
+            }
+            null
         } catch (e: Exception) {
             android.util.Log.e("SmuleRodDebug", "Extraction error: ${e.message}", e)
             null
@@ -1049,15 +1059,10 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Downloading: $fileName from ${media.url}")
             
-            val client = OkHttpClient.Builder()
-                .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-            
             val request = Request.Builder()
                 .url(media.url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header("User-Agent", DESKTOP_USER_AGENT)
+                .header("Referer", "https://www.smule.com/")
                 .build()
             
             val response = client.newCall(request).execute()
@@ -1212,6 +1217,17 @@ class MainActivity : ComponentActivity() {
             val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
             try { context.contentResolver.delete(uri, null, null) } catch (e: Exception) {}
         }
+    }
+
+    companion object {
+        private val client = OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+        
+        private const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
     }
 }
 
