@@ -918,15 +918,36 @@ class MainActivity : ComponentActivity() {
         
         return try {
             val redirResponse = client.newCall(redirRequest).execute()
-            val finalUrl = redirResponse.request.url.toString()
-            android.util.Log.d("SmuleRodDebug", "Resolved to: $finalUrl")
+            val statusCode = redirResponse.code
+            android.util.Log.d("SmuleRodDebug", "Redir response code: $statusCode")
             
-            // Check if we got a valid CDN URL (not still on smule.com/redir)
-            if (finalUrl.contains("cdn.smule.com") && !finalUrl.contains("/redir")) {
-                finalUrl
-            } else {
-                android.util.Log.w("SmuleRodDebug", "Resolution failed, got: $finalUrl")
-                null
+            when (statusCode) {
+                302, 301, 303, 307, 308 -> {
+                    // Get the Location header for the redirect
+                    val location = redirResponse.header("Location")
+                    android.util.Log.d("SmuleRodDebug", "Redirect Location: $location")
+                    
+                    if (location != null && location.contains("cdn.smule.com")) {
+                        location
+                    } else {
+                        android.util.Log.w("SmuleRodDebug", "Unexpected redirect location: $location")
+                        null
+                    }
+                }
+                418 -> {
+                    android.util.Log.e("SmuleRodDebug", "Got 418 (blocked by Cloudflare)")
+                    null
+                }
+                200 -> {
+                    // Sometimes Smule returns 200 with the actual content or a different structure
+                    val body = redirResponse.body?.string() ?: ""
+                    android.util.Log.w("SmuleRodDebug", "Got 200, body length: ${body.length}")
+                    null
+                }
+                else -> {
+                    android.util.Log.w("SmuleRodDebug", "Unexpected status code: $statusCode")
+                    null
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e("SmuleRodDebug", "Resolution error: ${e.message}")
@@ -964,20 +985,58 @@ class MainActivity : ComponentActivity() {
             android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
             
             // Fetch the main page to get the embedded JSON data
+            // We need to follow redirects manually since Smule does a 301
             android.util.Log.d("SmuleRodDebug", "Fetching main page")
-            val mainRequest = Request.Builder()
-                .url(finalBaseUrl)
-                .addCommonHeaders("https://www.smule.com/")
-                .build()
+            var currentUrl = finalBaseUrl
+            var mainHtml = ""
+            var attempts = 0
             
-            val mainResponse = client.newCall(mainRequest).execute()
-            if (!mainResponse.isSuccessful) {
-                android.util.Log.e("SmuleRodDebug", "Main page failed: ${mainResponse.code}")
-                return@withContext null
+            while (attempts < 5) {
+                attempts++
+                val mainRequest = Request.Builder()
+                    .url(currentUrl)
+                    .addCommonHeaders("https://www.smule.com/")
+                    .build()
+                
+                val mainResponse = client.newCall(mainRequest).execute()
+                val statusCode = mainResponse.code
+                android.util.Log.d("SmuleRodDebug", "Main page response: $statusCode for $currentUrl")
+                
+                when (statusCode) {
+                    200 -> {
+                        mainHtml = mainResponse.body?.string() ?: ""
+                        android.util.Log.d("SmuleRodDebug", "Main page HTML length: ${mainHtml.length}")
+                        break
+                    }
+                    301, 302, 303, 307, 308 -> {
+                        val location = mainResponse.header("Location")
+                        if (location != null) {
+                            currentUrl = if (location.startsWith("/")) {
+                                "https://www.smule.com$location"
+                            } else {
+                                location
+                            }
+                            android.util.Log.d("SmuleRodDebug", "Following redirect to: $currentUrl")
+                        } else {
+                            android.util.Log.e("SmuleRodDebug", "Redirect without Location header")
+                            return@withContext null
+                        }
+                    }
+                    418 -> {
+                        android.util.Log.e("SmuleRodDebug", "Main page blocked (418)")
+                        return@withContext null
+                    }
+                    else -> {
+                        android.util.Log.e("SmuleRodDebug", "Main page failed: $statusCode")
+                        return@withContext null
+                    }
+                }
             }
             
-            val mainHtml = mainResponse.body?.string() ?: ""
-            android.util.Log.d("SmuleRodDebug", "Main page HTML length: ${mainHtml.length}")
+            if (mainHtml.isEmpty()) {
+                android.util.Log.e("SmuleRodDebug", "Failed to fetch main page after $attempts attempts")
+                return@withContext null
+            }
             
             val mainDoc = Jsoup.parse(mainHtml)
             val title = mainDoc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
@@ -986,7 +1045,8 @@ class MainActivity : ComponentActivity() {
             // Detect performance type from the JSON
             val typeMatch = Regex("\"type\":\"([^\"]+)\"").find(mainHtml)
             val performanceType = typeMatch?.groupValues?.get(1) ?: "unknown"
-            val isVideoPerformance = performanceType == "video"
+            // "video" and "visualizer" both have video content
+            val isVideoPerformance = performanceType == "video" || performanceType == "visualizer"
             android.util.Log.d("SmuleRodDebug", "Performance type: $performanceType, isVideo: $isVideoPerformance")
             
             // Extract all potential media URLs upfront
@@ -1002,50 +1062,43 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Found URLs - MP4: ${encryptedMp4.take(30)}, Video: ${encryptedVideo.take(30)}, Visualizer: ${encryptedVisualizer.take(30)}, Media: ${encryptedMedia.take(30)}")
             
-            // Priority order for video: video_media_mp4_url > video_media_url > visualizer_media_url
-            // For audio-only: media_url
+            // Priority order: video_media_mp4_url > visualizer_media_url > video_media_url > media_url (video) > media_url (audio)
             
-            if (isVideoPerformance) {
-                // Try video_media_mp4_url first (best quality)
-                if (encryptedMp4.isNotBlank()) {
-                    val resolvedUrl = resolveSmuleUrl(encryptedMp4, finalBaseUrl)
-                    if (resolvedUrl != null) {
-                        android.util.Log.d("SmuleRodDebug", "Returning MP4 video: $resolvedUrl")
-                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                    }
+            // Try video_media_mp4_url first (best quality for regular videos)
+            if (encryptedMp4.isNotBlank()) {
+                val resolvedUrl = resolveSmuleUrl(encryptedMp4, finalBaseUrl)
+                if (resolvedUrl != null) {
+                    android.util.Log.d("SmuleRodDebug", "Returning MP4 video: $resolvedUrl")
+                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
                 }
-                
-                // Try video_media_url
-                if (encryptedVideo.isNotBlank()) {
-                    val resolvedUrl = resolveSmuleUrl(encryptedVideo, finalBaseUrl)
-                    if (resolvedUrl != null) {
-                        android.util.Log.d("SmuleRodDebug", "Returning video_media: $resolvedUrl")
-                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                    }
+            }
+            
+            // Try visualizer_media_url (for visualizer/text animation videos)
+            if (encryptedVisualizer.isNotBlank()) {
+                val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, finalBaseUrl)
+                if (resolvedUrl != null) {
+                    android.util.Log.d("SmuleRodDebug", "Returning visualizer video: $resolvedUrl")
+                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
                 }
-                
-                // Try visualizer_media_url
-                if (encryptedVisualizer.isNotBlank()) {
-                    val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, finalBaseUrl)
-                    if (resolvedUrl != null) {
-                        android.util.Log.d("SmuleRodDebug", "Returning visualizer: $resolvedUrl")
-                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                    }
+            }
+            
+            // Try video_media_url
+            if (encryptedVideo.isNotBlank()) {
+                val resolvedUrl = resolveSmuleUrl(encryptedVideo, finalBaseUrl)
+                if (resolvedUrl != null) {
+                    android.util.Log.d("SmuleRodDebug", "Returning video_media: $resolvedUrl")
+                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
                 }
-                
-                // Last resort for video: try media_url but still mark as video
-                if (encryptedMedia.isNotBlank()) {
-                    val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
-                    if (resolvedUrl != null) {
+            }
+            
+            // Fallback to media_url - mark as video if performance type is video/visualizer
+            if (encryptedMedia.isNotBlank()) {
+                val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
+                if (resolvedUrl != null) {
+                    if (isVideoPerformance) {
                         android.util.Log.w("SmuleRodDebug", "Falling back to media_url for video performance: $resolvedUrl")
                         return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                    }
-                }
-            } else {
-                // Audio performance - use media_url
-                if (encryptedMedia.isNotBlank()) {
-                    val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
-                    if (resolvedUrl != null) {
+                    } else {
                         android.util.Log.d("SmuleRodDebug", "Returning audio: $resolvedUrl")
                         return@withContext SmuleMedia(title, resolvedUrl, isVideo = false)
                     }
@@ -1078,12 +1131,13 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Downloading: $fileName from ${media.url}")
             
+            // Use downloadClient which follows redirects for CDN URLs
             val request = Request.Builder()
                 .url(media.url)
-                .addCommonHeaders("https://www.smule.com/")
+                .header("User-Agent", USER_AGENT)
                 .build()
             
-            val response = client.newCall(request).execute()
+            val response = downloadClient.newCall(request).execute()
             if (!response.isSuccessful) {
                 android.util.Log.e("SmuleRodDebug", "Download failed: ${response.code}")
                 return@withContext false
@@ -1253,20 +1307,49 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        // Shared cookie store across all requests - domain-aware
+        private val cookieStore = mutableMapOf<String, MutableList<Cookie>>()
+        
         private val client = OkHttpClient.Builder()
             .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(true)
+            .followRedirects(false) // We'll handle redirects manually for redir endpoint
+            .followSslRedirects(false)
             .cookieJar(object : CookieJar {
-                private val cookieStore = mutableMapOf<String, List<Cookie>>()
                 override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                    cookieStore[url.host] = cookies
+                    for (cookie in cookies) {
+                        val domain = cookie.domain.removePrefix(".")
+                        val key = domain
+                        if (cookieStore[key] == null) {
+                            cookieStore[key] = mutableListOf()
+                        }
+                        // Remove old cookie with same name, then add new one
+                        cookieStore[key]!!.removeAll { it.name == cookie.name }
+                        cookieStore[key]!!.add(cookie)
+                        android.util.Log.d("SmuleRodDebug", "Saved cookie: ${cookie.name}=${cookie.value.take(20)}... for domain $domain")
+                    }
                 }
                 override fun loadForRequest(url: HttpUrl): List<Cookie> {
-                    return cookieStore[url.host] ?: listOf()
+                    val cookies = mutableListOf<Cookie>()
+                    // Match cookies for this host and parent domains
+                    for ((domain, domainCookies) in cookieStore) {
+                        if (url.host == domain || url.host.endsWith(".$domain")) {
+                            cookies.addAll(domainCookies.filter { !it.expiresAt.let { exp -> exp < System.currentTimeMillis() } })
+                        }
+                    }
+                    return cookies
                 }
             })
+            .build()
+        
+        // Separate client for following redirects (CDN downloads)
+        private val downloadClient = OkHttpClient.Builder()
+            .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .build()
         
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UD1A.230805.019; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.135 Mobile Safari/537.36"
