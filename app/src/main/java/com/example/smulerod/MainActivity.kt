@@ -895,42 +895,55 @@ class MainActivity : ComponentActivity() {
         var stableCount = 0
         val latch = java.util.concurrent.CountDownLatch(1)
         
+        // Clear cookies to ensure a fresh session
+        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+        android.webkit.CookieManager.getInstance().flush()
+        
         val webView = WebView(this@MainActivity).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.userAgentString = USER_AGENT
+            settings.databaseEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
+            // Use a very standard Chrome Mobile User-Agent
+            settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36"
             
             webViewClient = object : WebViewClient() {
                 private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                private var checkRunnable: Runnable? = null
                 
                 override fun onPageFinished(view: WebView, url: String) {
                     android.util.Log.d("SmuleRodDebug", "WebView onPageFinished: $url")
                     
-                    // Start checking for content stability (Cloudflare challenge completion)
-                    checkRunnable = object : Runnable {
+                    val checkRunnable = object : Runnable {
                         override fun run() {
                             view.evaluateJavascript("document.documentElement.outerHTML") { result ->
                                 val currentHtml = result?.trim('"')?.replace("\\u003C", "<")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\/", "/") ?: ""
                                 val currentLength = currentHtml.length
                                 
-                                android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes (prev: $lastHtmlLength)")
+                                val isChallenge = currentHtml.contains("Cloudflare", ignoreCase = true) || 
+                                                 currentHtml.contains("Just a moment", ignoreCase = true) ||
+                                                 currentHtml.contains("cf-challenge", ignoreCase = true)
                                 
-                                // Check if page has actual content (>10KB suggests real page loaded)
-                                if (currentLength > 10000) {
+                                if (currentLength < 500) {
+                                    android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes. Content: ${currentHtml.take(200)}")
+                                } else {
+                                    android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes, isChallenge: $isChallenge")
+                                }
+                                
+                                // Check if page has actual Smule content (look for DataStore or performance)
+                                if (currentLength > 10000 && (currentHtml.contains("DataStore") || currentHtml.contains("performance"))) {
                                     html = currentHtml
-                                    android.util.Log.d("SmuleRodDebug", "WebView content loaded successfully")
+                                    android.util.Log.d("SmuleRodDebug", "WebView Smule content loaded successfully")
                                     latch.countDown()
                                     return@evaluateJavascript
                                 }
                                 
-                                // If size is stable for 3 checks and >1KB, assume it's done (might be error page)
-                                if (currentLength == lastHtmlLength && currentLength > 1000) {
+                                // If it's a block page or error page, wait for stability
+                                if (currentLength == lastHtmlLength && currentLength > 0) {
                                     stableCount++
-                                    if (stableCount >= 3) {
+                                    // If stable for 5 seconds (10 checks), give up on this URL
+                                    if (stableCount >= 10) {
                                         html = currentHtml
-                                        android.util.Log.d("SmuleRodDebug", "WebView content stable at $currentLength bytes")
+                                        android.util.Log.d("SmuleRodDebug", "WebView stable but no content found at $currentLength bytes")
                                         latch.countDown()
                                         return@evaluateJavascript
                                     }
@@ -939,12 +952,11 @@ class MainActivity : ComponentActivity() {
                                     lastHtmlLength = currentLength
                                 }
                                 
-                                // Keep checking every 500ms
                                 handler.postDelayed(this, 500)
                             }
                         }
                     }
-                    handler.postDelayed(checkRunnable!!, 1000) // Start checking after 1s
+                    handler.postDelayed(checkRunnable, 1000)
                 }
             }
         }
@@ -952,13 +964,13 @@ class MainActivity : ComponentActivity() {
         android.util.Log.d("SmuleRodDebug", "Loading URL in WebView: $url")
         webView.loadUrl(url)
         
-        // Wait up to 30 seconds for page to load
         withContext(Dispatchers.IO) {
             latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
         }
         
+        val finalHtml = html
         webView.destroy()
-        html
+        finalHtml
     }
 
     private fun Request.Builder.addCommonHeaders(referer: String? = null): Request.Builder {
@@ -1040,14 +1052,6 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchMediaInfo(smuleUrl: String): SmuleMedia? = withContext(Dispatchers.IO) {
         try {
             android.util.Log.d("SmuleRodDebug", "Starting extraction for: $smuleUrl")
-            
-            // Test DNS resolution
-            try {
-                val addresses = java.net.InetAddress.getAllByName("www.smule.com")
-                android.util.Log.d("SmuleRodDebug", "DNS Resolution for www.smule.com: ${addresses.joinToString { it.hostAddress ?: "" }}")
-            } catch (e: Exception) {
-                android.util.Log.e("SmuleRodDebug", "DNS Resolution failed: ${e.message}")
-            }
 
             var cleanUrl = smuleUrl.trim()
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
@@ -1061,38 +1065,114 @@ class MainActivity : ComponentActivity() {
                 return@withContext null
             }
             
-            val baseHost = if (uri.host?.contains("smule.com") == true) uri.host else "www.smule.com"
-            val finalBaseUrl = "https://$baseHost$path"
-            
-            android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
-            
-            // Use WebView to fetch the page (bypasses Cloudflare TLS/HTTP2 fingerprinting)
-            android.util.Log.d("SmuleRodDebug", "Fetching page via WebView")
-            val mainHtml = fetchPageWithWebView(finalBaseUrl)
-            
-            if (mainHtml.isEmpty()) {
-                android.util.Log.e("SmuleRodDebug", "Failed to fetch page via WebView")
+            // Extract performance key from URL path
+            // URL format: /sing-recording/{key} or /recording/{key} or /p/{key}
+            val performanceKey = path.split("/").lastOrNull { it.isNotBlank() }
+            if (performanceKey.isNullOrBlank()) {
+                android.util.Log.e("SmuleRodDebug", "Failed to extract performance key from: $path")
                 return@withContext null
             }
             
-            android.util.Log.d("SmuleRodDebug", "WebView fetch complete, HTML length: ${mainHtml.length}")
+            android.util.Log.d("SmuleRodDebug", "Performance key: $performanceKey")
             
-            val mainDoc = Jsoup.parse(mainHtml)
-            val title = mainDoc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
+            var jsonData: String? = null
+
+            // 1. Try oEmbed endpoint (often less protected)
+            try {
+                // Use the /p/ format for oEmbed as it's more standard
+                val targetUrl = "https://www.smule.com/p/$performanceKey"
+                val oEmbedUrl = "https://www.smule.com/en/utils/oembed?url=${java.net.URLEncoder.encode(targetUrl, "UTF-8")}&format=json"
+                android.util.Log.d("SmuleRodDebug", "Trying oEmbed: $oEmbedUrl")
+                val oEmbedRequest = Request.Builder()
+                    .url(oEmbedUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json")
+                    .build()
+                val oEmbedResponse = client.newCall(oEmbedRequest).execute()
+                if (oEmbedResponse.code == 200) {
+                    val oEmbedData = oEmbedResponse.body?.string() ?: ""
+                    if (oEmbedData.contains("video_media_mp4_url") || oEmbedData.contains("media_url")) {
+                        jsonData = oEmbedData
+                        android.util.Log.d("SmuleRodDebug", "Found data in oEmbed")
+                    }
+                } else {
+                    android.util.Log.d("SmuleRodDebug", "oEmbed failed with code: ${oEmbedResponse.code}")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("SmuleRodDebug", "oEmbed failed: ${e.message}")
+            }
+
+            // 2. Try Smule's API endpoint directly
+            if (jsonData.isNullOrBlank()) {
+                val apiUrl = "https://www.smule.com/s/performance/$performanceKey"
+                android.util.Log.d("SmuleRodDebug", "Trying API URL: $apiUrl")
+                
+                val apiRequest = Request.Builder()
+                    .url(apiUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json, text/plain, */*")
+                    .header("Referer", "https://www.smule.com/")
+                    .build()
+                
+                try {
+                    val apiResponse = client.newCall(apiRequest).execute()
+                    android.util.Log.d("SmuleRodDebug", "API response code: ${apiResponse.code}")
+                    
+                    if (apiResponse.code == 200) {
+                        jsonData = apiResponse.body?.string()
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SmuleRodDebug", "API request failed: ${e.message}")
+                }
+            }
+            
+            // 3. If API didn't work, try the web page with WebView
+            if (jsonData.isNullOrBlank() || jsonData.length < 1000) {
+                android.util.Log.d("SmuleRodDebug", "API failed, trying WebView fallback")
+                
+                // Try multiple URL formats in order of reliability
+                val urlsToTry = listOf(
+                    "https://www.smule.com/recording/$performanceKey",
+                    "https://www.smule.com/p/$performanceKey",
+                    cleanUrl // Original URL
+                )
+                
+                for (webUrl in urlsToTry) {
+                    android.util.Log.d("SmuleRodDebug", "Trying WebView with URL: $webUrl")
+                    val html = fetchPageWithWebView(webUrl)
+                    if (html.length > 10000 && (html.contains("DataStore") || html.contains("performance"))) {
+                        jsonData = html
+                        android.util.Log.d("SmuleRodDebug", "Successfully fetched data from $webUrl")
+                        break
+                    } else {
+                        android.util.Log.w("SmuleRodDebug", "WebView failed for $webUrl (length: ${html.length})")
+                    }
+                }
+            }
+            
+            if (jsonData.isNullOrBlank() || jsonData.length < 1000) {
+                android.util.Log.e("SmuleRodDebug", "Failed to get performance data after all attempts")
+                return@withContext null
+            }
+            
+            android.util.Log.d("SmuleRodDebug", "Got data, length: ${jsonData.length}")
+            
+            // Parse title
+            val titleMatch = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
+            val title = titleMatch?.groupValues?.get(1)?.replace("\\u0026", "&") ?: "Smule_Recording"
             android.util.Log.d("SmuleRodDebug", "Title: $title")
             
             // Detect performance type from the JSON
-            val typeMatch = Regex("\"type\":\"([^\"]+)\"").find(mainHtml)
+            val typeMatch = Regex("\"type\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
             val performanceType = typeMatch?.groupValues?.get(1) ?: "unknown"
-            // "video" and "visualizer" both have video content
             val isVideoPerformance = performanceType == "video" || performanceType == "visualizer"
             android.util.Log.d("SmuleRodDebug", "Performance type: $performanceType, isVideo: $isVideoPerformance")
             
             // Extract all potential media URLs upfront
-            val mp4UrlMatch = Regex("\"video_media_mp4_url\":\"([^\"]+)\"").find(mainHtml)
-            val videoUrlMatch = Regex("\"video_media_url\":\"([^\"]+)\"").find(mainHtml)
-            val visualizerUrlMatch = Regex("\"visualizer_media_url\":\"([^\"]+)\"").find(mainHtml)
-            val mediaUrlMatch = Regex("\"media_url\":\"([^\"]+)\"").find(mainHtml)
+            val mp4UrlMatch = Regex("\"video_media_mp4_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
+            val videoUrlMatch = Regex("\"video_media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
+            val visualizerUrlMatch = Regex("\"visualizer_media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
+            val mediaUrlMatch = Regex("\"media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
             
             val encryptedMp4 = mp4UrlMatch?.groupValues?.get(1) ?: ""
             val encryptedVideo = videoUrlMatch?.groupValues?.get(1) ?: ""
@@ -1101,11 +1181,13 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Found URLs - MP4: ${encryptedMp4.take(30)}, Video: ${encryptedVideo.take(30)}, Visualizer: ${encryptedVisualizer.take(30)}, Media: ${encryptedMedia.take(30)}")
             
+            val refererUrl = "https://www.smule.com$path"
+            
             // Priority order: video_media_mp4_url > visualizer_media_url > video_media_url > media_url (video) > media_url (audio)
             
             // Try video_media_mp4_url first (best quality for regular videos)
             if (encryptedMp4.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedMp4, finalBaseUrl)
+                val resolvedUrl = resolveSmuleUrl(encryptedMp4, refererUrl)
                 if (resolvedUrl != null) {
                     android.util.Log.d("SmuleRodDebug", "Returning MP4 video: $resolvedUrl")
                     return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
@@ -1114,7 +1196,7 @@ class MainActivity : ComponentActivity() {
             
             // Try visualizer_media_url (for visualizer/text animation videos)
             if (encryptedVisualizer.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, finalBaseUrl)
+                val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, refererUrl)
                 if (resolvedUrl != null) {
                     android.util.Log.d("SmuleRodDebug", "Returning visualizer video: $resolvedUrl")
                     return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
@@ -1123,7 +1205,7 @@ class MainActivity : ComponentActivity() {
             
             // Try video_media_url
             if (encryptedVideo.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedVideo, finalBaseUrl)
+                val resolvedUrl = resolveSmuleUrl(encryptedVideo, refererUrl)
                 if (resolvedUrl != null) {
                     android.util.Log.d("SmuleRodDebug", "Returning video_media: $resolvedUrl")
                     return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
@@ -1132,7 +1214,7 @@ class MainActivity : ComponentActivity() {
             
             // Fallback to media_url - mark as video if performance type is video/visualizer
             if (encryptedMedia.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedMedia, finalBaseUrl)
+                val resolvedUrl = resolveSmuleUrl(encryptedMedia, refererUrl)
                 if (resolvedUrl != null) {
                     if (isVideoPerformance) {
                         android.util.Log.w("SmuleRodDebug", "Falling back to media_url for video performance: $resolvedUrl")
