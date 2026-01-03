@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.smulerod"
         minSdk = 24
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.2.1"
+        versionCode = 15
+        versionName = "1.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -20,9 +20,22 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../smulerod.jks")
+            storePassword = "smulerod123"
+            keyAlias = "smulerod"
+            keyPassword = "smulerod123"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("release")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
