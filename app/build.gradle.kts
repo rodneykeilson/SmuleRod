@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.smulerod"
         minSdk = 24
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.2.6"
+        versionCode = 20
+        versionName = "1.2.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

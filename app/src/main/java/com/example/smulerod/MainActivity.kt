@@ -59,6 +59,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.CookieManager
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -882,6 +885,41 @@ class MainActivity : ComponentActivity() {
         val seconds = totalSeconds % 60
         return String.format("%02d:%02d", minutes, seconds)
     }
+    
+    /**
+     * Fetch page HTML using WebView to bypass Cloudflare fingerprinting
+     */
+    private suspend fun fetchPageWithWebView(url: String): String = withContext(Dispatchers.Main) {
+        var html = ""
+        val latch = java.util.concurrent.CountDownLatch(1)
+        
+        val webView = WebView(this@MainActivity).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.userAgentString = USER_AGENT
+            
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    view.evaluateJavascript("document.documentElement.outerHTML") { result ->
+                        html = result?.trim('"')?.replace("\\u003C", "<")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\/", "/") ?: ""
+                        android.util.Log.d("SmuleRodDebug", "WebView HTML length: ${html.length}")
+                        latch.countDown()
+                    }
+                }
+            }
+        }
+        
+        android.util.Log.d("SmuleRodDebug", "Loading URL in WebView: $url")
+        webView.loadUrl(url)
+        
+        // Wait up to 30 seconds for page to load
+        withContext(Dispatchers.IO) {
+            latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        
+        webView.destroy()
+        html
+    }
 
     private fun Request.Builder.addCommonHeaders(referer: String? = null): Request.Builder {
         header("User-Agent", USER_AGENT)
@@ -988,77 +1026,16 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Final Base URL: $finalBaseUrl")
             
-            // First, visit the homepage to get Cloudflare cookies and establish a session
-            // This makes subsequent requests look more legitimate
-            android.util.Log.d("SmuleRodDebug", "Warming up session with homepage visit")
-            try {
-                val homepageRequest = Request.Builder()
-                    .url("https://www.smule.com/")
-                    .addCommonHeaders()
-                    .build()
-                val homepageResponse = client.newCall(homepageRequest).execute()
-                android.util.Log.d("SmuleRodDebug", "Homepage response: ${homepageResponse.code}")
-                homepageResponse.body?.close()
-                
-                // Small delay to make it look more natural
-                kotlinx.coroutines.delay(500)
-            } catch (e: Exception) {
-                android.util.Log.w("SmuleRodDebug", "Homepage warmup failed: ${e.message}")
-            }
-            
-            // Fetch the main page to get the embedded JSON data
-            // We need to follow redirects manually since Smule does a 301
-            android.util.Log.d("SmuleRodDebug", "Fetching main page")
-            var currentUrl = finalBaseUrl
-            var mainHtml = ""
-            var attempts = 0
-            
-            while (attempts < 5) {
-                attempts++
-                val mainRequest = Request.Builder()
-                    .url(currentUrl)
-                    .addCommonHeaders("https://www.smule.com/")
-                    .build()
-                
-                val mainResponse = client.newCall(mainRequest).execute()
-                val statusCode = mainResponse.code
-                android.util.Log.d("SmuleRodDebug", "Main page response: $statusCode for $currentUrl")
-                
-                when (statusCode) {
-                    200 -> {
-                        mainHtml = mainResponse.body?.string() ?: ""
-                        android.util.Log.d("SmuleRodDebug", "Main page HTML length: ${mainHtml.length}")
-                        break
-                    }
-                    301, 302, 303, 307, 308 -> {
-                        val location = mainResponse.header("Location")
-                        if (location != null) {
-                            currentUrl = if (location.startsWith("/")) {
-                                "https://www.smule.com$location"
-                            } else {
-                                location
-                            }
-                            android.util.Log.d("SmuleRodDebug", "Following redirect to: $currentUrl")
-                        } else {
-                            android.util.Log.e("SmuleRodDebug", "Redirect without Location header")
-                            return@withContext null
-                        }
-                    }
-                    418 -> {
-                        android.util.Log.e("SmuleRodDebug", "Main page blocked (418)")
-                        return@withContext null
-                    }
-                    else -> {
-                        android.util.Log.e("SmuleRodDebug", "Main page failed: $statusCode")
-                        return@withContext null
-                    }
-                }
-            }
+            // Use WebView to fetch the page (bypasses Cloudflare TLS/HTTP2 fingerprinting)
+            android.util.Log.d("SmuleRodDebug", "Fetching page via WebView")
+            val mainHtml = fetchPageWithWebView(finalBaseUrl)
             
             if (mainHtml.isEmpty()) {
-                android.util.Log.e("SmuleRodDebug", "Failed to fetch main page after $attempts attempts")
+                android.util.Log.e("SmuleRodDebug", "Failed to fetch page via WebView")
                 return@withContext null
             }
+            
+            android.util.Log.d("SmuleRodDebug", "WebView fetch complete, HTML length: ${mainHtml.length}")
             
             val mainDoc = Jsoup.parse(mainHtml)
             val title = mainDoc.select("meta[property=og:title]").attr("content").ifBlank { "Smule_Recording" }
