@@ -48,6 +48,9 @@
 - **Language**: Kotlin
 - **UI**: Jetpack Compose (Material 3)
 - **Media**: Media3 ExoPlayer & Coil Video Decoding
+- **Extraction**: WebView-based "Spider" strategy to bypass Cloudflare protection.
+- **Networking**: OkHttp with domain-aware cookie synchronization.
+- **Lifecycle**: Activity-level download management for resilience against UI state changes.
 - **Min SDK**: 24 (Android 7.0)
 - **Target SDK**: 34 (Android 14)
 
