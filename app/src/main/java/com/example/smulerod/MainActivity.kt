@@ -886,77 +886,77 @@ class MainActivity : ComponentActivity() {
         return String.format("%02d:%02d", minutes, seconds)
     }
     
+    private class SmuleSpider(private val onFound: (String) -> Unit) {
+        @android.webkit.JavascriptInterface
+        fun OnVideoFound(json: String) {
+            onFound(json)
+        }
+    }
+
     /**
      * Fetch page HTML using WebView to bypass Cloudflare fingerprinting
      */
-    private suspend fun fetchPageWithWebView(url: String): String = withContext(Dispatchers.Main) {
-        var html = ""
-        var lastHtmlLength = 0
-        var stableCount = 0
+    private suspend fun extractMediaWithWebView(url: String): String? = withContext(Dispatchers.Main) {
+        var resultJson: String? = null
         val latch = java.util.concurrent.CountDownLatch(1)
         
         // Clear cookies to ensure a fresh session
         android.webkit.CookieManager.getInstance().removeAllCookies(null)
         android.webkit.CookieManager.getInstance().flush()
         
+        val spider = SmuleSpider { json ->
+            resultJson = json
+            latch.countDown()
+        }
+        
         val webView = WebView(this@MainActivity).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
-            // Use a very standard Chrome Mobile User-Agent
-            settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36"
+            // Use the specific User-Agent from the successful app
+            settings.userAgentString = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Mobile Safari/537.36UCBrowser/13.3.5.1304"
+            
+            addJavascriptInterface(spider, "phoenix")
             
             webViewClient = object : WebViewClient() {
-                private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                
                 override fun onPageFinished(view: WebView, url: String) {
                     android.util.Log.d("SmuleRodDebug", "WebView onPageFinished: $url")
                     
-                    val checkRunnable = object : Runnable {
-                        override fun run() {
-                            view.evaluateJavascript("document.documentElement.outerHTML") { result ->
-                                val currentHtml = result?.trim('"')?.replace("\\u003C", "<")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\/", "/") ?: ""
-                                val currentLength = currentHtml.length
-                                
-                                val isChallenge = currentHtml.contains("Cloudflare", ignoreCase = true) || 
-                                                 currentHtml.contains("Just a moment", ignoreCase = true) ||
-                                                 currentHtml.contains("cf-challenge", ignoreCase = true)
-                                
-                                if (currentLength < 500) {
-                                    android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes. Content: ${currentHtml.take(200)}")
-                                } else {
-                                    android.util.Log.d("SmuleRodDebug", "WebView HTML check: $currentLength bytes, isChallenge: $isChallenge")
-                                }
-                                
-                                // Check if page has actual Smule content (look for DataStore or performance)
-                                if (currentLength > 10000 && (currentHtml.contains("DataStore") || currentHtml.contains("performance"))) {
-                                    html = currentHtml
-                                    android.util.Log.d("SmuleRodDebug", "WebView Smule content loaded successfully")
-                                    latch.countDown()
-                                    return@evaluateJavascript
-                                }
-                                
-                                // If it's a block page or error page, wait for stability
-                                if (currentLength == lastHtmlLength && currentLength > 0) {
-                                    stableCount++
-                                    // If stable for 5 seconds (10 checks), give up on this URL
-                                    if (stableCount >= 10) {
-                                        html = currentHtml
-                                        android.util.Log.d("SmuleRodDebug", "WebView stable but no content found at $currentLength bytes")
-                                        latch.countDown()
-                                        return@evaluateJavascript
+                    val script = """
+                        var phxVideoIsFound=false;
+                        var phxVideoSpiderTicks=0;
+                        var phxVideoSpiderTickCount=30;
+                        smuleVideoSpider();
+                        function smuleVideoSpider(){
+                            try{
+                                if(phxVideoIsFound)return;
+                                phxVideoSpiderTicks++;
+                                var data={};
+                                var script=window.DataStore.Pages.Recording;
+                                var video=document.querySelector('video');
+                                var audio=document.querySelector('audio');
+                                if(script){
+                                    var json=script.performance;
+                                    data.title=json.title;
+                                    data.cover_url=json.cover_url;
+                                    data.handle=json.owner.handle;
+                                    if(video){data.url=video.src}
+                                    if(audio){data.url=audio.src}
+                                    if(data.url){
+                                        phxVideoIsFound=true;
+                                        phoenix.OnVideoFound(JSON.stringify(data))
                                     }
-                                } else {
-                                    stableCount = 0
-                                    lastHtmlLength = currentLength
                                 }
-                                
-                                handler.postDelayed(this, 500)
+                            }catch(e){console.log('e===='+e)}
+                            if(!phxVideoIsFound){
+                                if(phxVideoSpiderTicks<phxVideoSpiderTickCount){
+                                    setTimeout("smuleVideoSpider()",1000)
+                                }
                             }
                         }
-                    }
-                    handler.postDelayed(checkRunnable, 1000)
+                    """.trimIndent()
+                    view.evaluateJavascript(script, null)
                 }
             }
         }
@@ -965,12 +965,12 @@ class MainActivity : ComponentActivity() {
         webView.loadUrl(url)
         
         withContext(Dispatchers.IO) {
-            latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(45, java.util.concurrent.TimeUnit.SECONDS)
         }
         
-        val finalHtml = html
+        val finalResult = resultJson
         webView.destroy()
-        finalHtml
+        finalResult
     }
 
     private fun Request.Builder.addCommonHeaders(referer: String? = null): Request.Builder {
@@ -1139,13 +1139,20 @@ class MainActivity : ComponentActivity() {
                 
                 for (webUrl in urlsToTry) {
                     android.util.Log.d("SmuleRodDebug", "Trying WebView with URL: $webUrl")
-                    val html = fetchPageWithWebView(webUrl)
-                    if (html.length > 10000 && (html.contains("DataStore") || html.contains("performance"))) {
-                        jsonData = html
-                        android.util.Log.d("SmuleRodDebug", "Successfully fetched data from $webUrl")
-                        break
-                    } else {
-                        android.util.Log.w("SmuleRodDebug", "WebView failed for $webUrl (length: ${html.length})")
+                    val spiderJson = extractMediaWithWebView(webUrl)
+                    if (!spiderJson.isNullOrBlank()) {
+                        android.util.Log.d("SmuleRodDebug", "Spider found data: $spiderJson")
+                        
+                        // Parse the spider JSON
+                        val spiderTitle = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: "Smule_Recording"
+                        val spiderUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: ""
+                        
+                        if (spiderUrl.isNotBlank()) {
+                            // The spider returns the direct CDN URL, so we can return it immediately!
+                            val isVideo = spiderUrl.contains("mp4") || spiderUrl.contains("renvideo")
+                            android.util.Log.d("SmuleRodDebug", "Returning spider media: $spiderUrl (isVideo: $isVideo)")
+                            return@withContext SmuleMedia(spiderTitle, spiderUrl, isVideo = isVideo)
+                        }
                     }
                 }
             }
@@ -1252,10 +1259,22 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Downloading: $fileName from ${media.url}")
             
+            // Get cookies from WebView's CookieManager to pass to the download request
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            val cookies = cookieManager.getCookie(media.url)
+            if (cookies != null) {
+                android.util.Log.d("SmuleRodDebug", "Using cookies for download: ${cookies.take(20)}...")
+            }
+
             // Use downloadClient which follows redirects for CDN URLs
             val request = Request.Builder()
                 .url(media.url)
                 .header("User-Agent", USER_AGENT)
+                .apply {
+                    if (cookies != null) {
+                        header("Cookie", cookies)
+                    }
+                }
                 .build()
             
             val response = downloadClient.newCall(request).execute()
@@ -1473,7 +1492,7 @@ class MainActivity : ComponentActivity() {
             .followSslRedirects(true)
             .build()
         
-        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UD1A.230805.019; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.135 Mobile Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Mobile Safari/537.36UCBrowser/13.3.5.1304"
     }
 }
 
