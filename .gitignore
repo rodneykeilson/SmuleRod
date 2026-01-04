@@ -35,4 +35,12 @@ captures/
 *.swp
 *~
 
-successful-app-example
+# Test and Debug files
+*.html
+*.js
+*.py
+*.apk
+successful-app-example/
+.venv/
+.vscode/
+node_modules/
