@@ -17,6 +17,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -86,46 +87,133 @@ import java.io.FileOutputStream
 data class SmuleMedia(val title: String, val url: String, val isVideo: Boolean)
 data class DownloadedFile(val id: Long, val name: String, val uri: Uri, val size: String, val date: Long)
 
+// Download state that survives tab switches
+data class DownloadState(
+    val isExtracting: Boolean = false,
+    val isDownloading: Boolean = false,
+    val downloadComplete: Boolean = false,
+    val downloadProgress: Float = 0f,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val mediaType: String = "",
+    val statusText: String = ""
+)
+
 class MainActivity : ComponentActivity() {
+    private var urlState = mutableStateOf("")
+    private var downloadState = mutableStateOf(DownloadState())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        var initialUrl = ""
-        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            initialUrl = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-        }
+        handleIntent(intent)
 
         setContent {
             var isDarkMode by remember { mutableStateOf(false) } // Default to Light Mode
             
             val colorScheme = if (isDarkMode) {
                 darkColorScheme(
-                    primary = Color(0xFFD0BCFF),
-                    onPrimary = Color(0xFF381E72),
-                    primaryContainer = Color(0xFF4F378B),
-                    onPrimaryContainer = Color(0xFFEADDFF),
-                    background = Color(0xFF1C1B1F),
-                    onBackground = Color(0xFFE6E1E5),
-                    surface = Color(0xFF1C1B1F),
-                    onSurface = Color(0xFFE6E1E5)
+                    primary = Color(0xFF7CB8FF),       // Soft blue - high contrast on dark
+                    onPrimary = Color(0xFF00315C),
+                    primaryContainer = Color(0xFF1A4A73),
+                    onPrimaryContainer = Color(0xFFD4E7FF),
+                    secondary = Color(0xFF8FD68A),     // Soft green for success
+                    onSecondary = Color(0xFF003A00),
+                    secondaryContainer = Color(0xFF285224),
+                    onSecondaryContainer = Color(0xFFB5F2AF),
+                    background = Color(0xFF121619),   // Deep blue-gray
+                    onBackground = Color(0xFFE4E4E7),
+                    surface = Color(0xFF1A1E22),
+                    onSurface = Color(0xFFE4E4E7),
+                    surfaceVariant = Color(0xFF252A30),
+                    onSurfaceVariant = Color(0xFFC2C6CD)
                 )
             } else {
                 lightColorScheme(
-                    primary = Color(0xFF6750A4),
+                    primary = Color(0xFF0061A6),       // Strong blue - WCAG AAA
                     onPrimary = Color.White,
-                    primaryContainer = Color(0xFFEADDFF),
-                    onPrimaryContainer = Color(0xFF21005D),
-                    background = Color(0xFFFFFBFE),
-                    onBackground = Color(0xFF1C1B1F),
-                    surface = Color(0xFFFFFBFE),
-                    onSurface = Color(0xFF1C1B1F)
+                    primaryContainer = Color(0xFFD4E7FF),
+                    onPrimaryContainer = Color(0xFF001C38),
+                    secondary = Color(0xFF2E6B29),     // Forest green
+                    onSecondary = Color.White,
+                    secondaryContainer = Color(0xFFD4F5D0),
+                    onSecondaryContainer = Color(0xFF002200),
+                    background = Color(0xFFFCFCFF),   // Clean white with slight blue tint
+                    onBackground = Color(0xFF1A1C1E),
+                    surface = Color(0xFFFCFCFF),
+                    onSurface = Color(0xFF1A1C1E),
+                    surfaceVariant = Color(0xFFE8ECF2),
+                    onSurfaceVariant = Color(0xFF42474E)
                 )
             }
 
             MaterialTheme(colorScheme = colorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    MainApp(initialUrl, isDarkMode) { isDarkMode = it }
+                    MainApp(
+                        initialUrl = urlState.value,
+                        isDarkMode = isDarkMode,
+                        onThemeToggle = { isDarkMode = it },
+                        downloadState = downloadState.value,
+                        onStartDownload = { url -> startDownload(url) },
+                        onClearUrl = { urlState.value = "" }
+                    )
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            urlState.value = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+        } else if (intent?.action == Intent.ACTION_VIEW) {
+            urlState.value = intent.dataString ?: ""
+        }
+    }
+
+    private fun startDownload(url: String) {
+        if (downloadState.value.isExtracting || downloadState.value.isDownloading) return
+        
+        lifecycleScope.launch {
+            downloadState.value = DownloadState(
+                isExtracting = true,
+                statusText = "Extracting media info..."
+            )
+            
+            val media = fetchMediaInfo(url)
+            if (media != null) {
+                downloadState.value = downloadState.value.copy(
+                    isExtracting = false,
+                    isDownloading = true,
+                    mediaType = if (media.isVideo) "Video" else "Audio",
+                    statusText = "Downloading..."
+                )
+                
+                val success = downloadWithProgress(
+                    context = this@MainActivity,
+                    media = media,
+                    onProgress = { downloaded, total ->
+                        downloadState.value = downloadState.value.copy(
+                            downloadedBytes = downloaded,
+                            totalBytes = total,
+                            downloadProgress = if (total > 0) downloaded.toFloat() / total.toFloat() else 0f
+                        )
+                    }
+                )
+                
+                if (success) {
+                    downloadState.value = DownloadState(downloadComplete = true)
+                    urlState.value = ""
+                } else {
+                    downloadState.value = DownloadState()
+                }
+            } else {
+                downloadState.value = DownloadState()
             }
         }
     }
@@ -133,7 +221,14 @@ class MainActivity : ComponentActivity() {
     @androidx.annotation.OptIn(UnstableApi::class)
     @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
     @Composable
-    fun MainApp(initialUrl: String, isDarkMode: Boolean, onThemeToggle: (Boolean) -> Unit) {
+    fun MainApp(
+        initialUrl: String,
+        isDarkMode: Boolean,
+        onThemeToggle: (Boolean) -> Unit,
+        downloadState: DownloadState,
+        onStartDownload: (String) -> Unit,
+        onClearUrl: () -> Unit
+    ) {
         var currentTab by remember { mutableStateOf(0) } // 0: Home, 1: Files
         val scope = rememberCoroutineScope()
         val snackbarHostState = remember { SnackbarHostState() }
@@ -225,7 +320,13 @@ class MainActivity : ComponentActivity() {
         ) { padding ->
             Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                 if (currentTab == 0) {
-                    HomeContent(initialUrl, snackbarHostState)
+                    HomeContent(
+                        initialUrl = initialUrl,
+                        snackbarHostState = snackbarHostState,
+                        downloadState = downloadState,
+                        onStartDownload = onStartDownload,
+                        onClearUrl = onClearUrl
+                    )
                 } else {
                     FilesContent(
                         files = files,
@@ -255,23 +356,34 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
     @Composable
-    fun HomeContent(initialUrl: String, snackbarHostState: SnackbarHostState) {
-        var url by remember { mutableStateOf(initialUrl) }
-        var isExtracting by remember { mutableStateOf(false) }
-        var isDownloading by remember { mutableStateOf(false) }
-        var statusText by remember { mutableStateOf("") }
-        var downloadProgress by remember { mutableStateOf(0f) }
-        var downloadedBytes by remember { mutableStateOf(0L) }
-        var totalBytes by remember { mutableStateOf(0L) }
-        var downloadComplete by remember { mutableStateOf(false) }
-        var mediaType by remember { mutableStateOf("") } // "Video" or "Audio"
-        val scope = rememberCoroutineScope()
+    fun HomeContent(
+        initialUrl: String,
+        snackbarHostState: SnackbarHostState,
+        downloadState: DownloadState,
+        onStartDownload: (String) -> Unit,
+        onClearUrl: () -> Unit
+    ) {
+        var url by remember { mutableStateOf("") }
         val keyboardController = LocalSoftwareKeyboardController.current
         val clipboardManager = LocalClipboardManager.current
-        val context = LocalContext.current
         
         // Animated progress for smooth UI
-        val animatedProgress by animateFloatAsState(targetValue = downloadProgress, label = "progress")
+        val animatedProgress by animateFloatAsState(targetValue = downloadState.downloadProgress, label = "progress")
+
+        // Sync URL from intent
+        LaunchedEffect(initialUrl) {
+            if (initialUrl.isNotBlank() && url != initialUrl) {
+                url = initialUrl
+                onStartDownload(initialUrl)
+            }
+        }
+        
+        // Clear URL on download complete
+        LaunchedEffect(downloadState.downloadComplete) {
+            if (downloadState.downloadComplete) {
+                url = ""
+            }
+        }
 
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -280,15 +392,15 @@ class MainActivity : ComponentActivity() {
         ) {
             OutlinedTextField(
                 value = url,
-                onValueChange = { url = it; downloadComplete = false },
+                onValueChange = { url = it },
                 label = { Text("Paste Smule Link") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                enabled = !isExtracting && !isDownloading,
+                enabled = !downloadState.isExtracting && !downloadState.isDownloading,
                 trailingIcon = {
                     IconButton(
-                        onClick = { clipboardManager.getText()?.let { url = it.text; downloadComplete = false } },
-                        enabled = !isExtracting && !isDownloading
+                        onClick = { clipboardManager.getText()?.let { url = it.text } },
+                        enabled = !downloadState.isExtracting && !downloadState.isDownloading
                     ) {
                         Icon(Icons.Default.ContentPaste, contentDescription = "Paste from clipboard")
                     }
@@ -298,13 +410,13 @@ class MainActivity : ComponentActivity() {
             Spacer(modifier = Modifier.height(16.dp))
             
             // Download Progress Card - Shows during extraction and download
-            AnimatedVisibility(visible = isExtracting || isDownloading || downloadComplete) {
+            AnimatedVisibility(visible = downloadState.isExtracting || downloadState.isDownloading || downloadState.downloadComplete) {
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = when {
-                            downloadComplete -> MaterialTheme.colorScheme.primaryContainer
-                            isDownloading -> MaterialTheme.colorScheme.secondaryContainer
+                            downloadState.downloadComplete -> MaterialTheme.colorScheme.secondaryContainer
+                            downloadState.isDownloading -> MaterialTheme.colorScheme.primaryContainer
                             else -> MaterialTheme.colorScheme.surfaceVariant
                         }
                     )
@@ -316,16 +428,16 @@ class MainActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             when {
-                                downloadComplete -> Icon(
+                                downloadState.downloadComplete -> Icon(
                                     Icons.Default.CheckCircle,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
+                                    tint = MaterialTheme.colorScheme.secondary,
                                     modifier = Modifier.size(28.dp)
                                 )
-                                isDownloading -> Icon(
-                                    if (mediaType == "Video") Icons.Default.VideoFile else Icons.Default.AudioFile,
+                                downloadState.isDownloading -> Icon(
+                                    if (downloadState.mediaType == "Video") Icons.Default.VideoFile else Icons.Default.AudioFile,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.secondary,
+                                    tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.size(28.dp)
                                 )
                                 else -> CircularProgressIndicator(
@@ -337,21 +449,21 @@ class MainActivity : ComponentActivity() {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = when {
-                                        downloadComplete -> "Download Complete!"
-                                        isDownloading -> "Downloading $mediaType..."
-                                        else -> statusText
+                                        downloadState.downloadComplete -> "Download Complete!"
+                                        downloadState.isDownloading -> "Downloading ${downloadState.mediaType}..."
+                                        else -> downloadState.statusText
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Medium
                                 )
-                                if (isDownloading && totalBytes > 0) {
+                                if (downloadState.isDownloading && downloadState.totalBytes > 0) {
                                     Text(
-                                        text = "${formatSize(downloadedBytes)} / ${formatSize(totalBytes)}",
+                                        text = "${formatSize(downloadState.downloadedBytes)} / ${formatSize(downloadState.totalBytes)}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                if (downloadComplete) {
+                                if (downloadState.downloadComplete) {
                                     Text(
                                         text = "Check the Files tab to view",
                                         style = MaterialTheme.typography.bodySmall,
@@ -359,9 +471,9 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
-                            if (isDownloading && totalBytes > 0) {
+                            if (downloadState.isDownloading && downloadState.totalBytes > 0) {
                                 Text(
-                                    text = "${(downloadProgress * 100).toInt()}%",
+                                    text = "${(downloadState.downloadProgress * 100).toInt()}%",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
@@ -370,9 +482,10 @@ class MainActivity : ComponentActivity() {
                         }
                         
                         // Progress bar during download
-                        if (isDownloading) {
+                        if (downloadState.isDownloading) {
                             Spacer(Modifier.height(12.dp))
-                            if (totalBytes > 0) {
+                            if (downloadState.totalBytes > 0) {
+                                @Suppress("DEPRECATION")
                                 LinearProgressIndicator(
                                     progress = animatedProgress,
                                     modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
@@ -386,14 +499,6 @@ class MainActivity : ComponentActivity() {
                                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                                 )
                             }
-                            if (totalBytes == 0L) {
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = "Downloading... (size unknown)",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
                         }
                     }
                 }
@@ -402,55 +507,15 @@ class MainActivity : ComponentActivity() {
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
-                    if (url.isNotBlank() && !isExtracting && !isDownloading) {
+                    if (url.isNotBlank() && !downloadState.isExtracting && !downloadState.isDownloading) {
                         keyboardController?.hide()
-                        isExtracting = true
-                        isDownloading = false
-                        downloadComplete = false
-                        downloadProgress = 0f
-                        downloadedBytes = 0L
-                        totalBytes = 0L
-                        statusText = "Connecting to Smule..."
-                        scope.launch {
-                            statusText = "Extracting media info..."
-                            val media = fetchMediaInfo(url)
-                            if (media != null) {
-                                isExtracting = false
-                                isDownloading = true
-                                mediaType = if (media.isVideo) "Video" else "Audio"
-                                statusText = "Starting download..."
-                                
-                                // Download with progress tracking
-                                val success = downloadWithProgress(
-                                    context = context,
-                                    media = media,
-                                    onProgress = { downloaded, total ->
-                                        downloadedBytes = downloaded
-                                        totalBytes = total
-                                        if (total > 0) {
-                                            downloadProgress = downloaded.toFloat() / total.toFloat()
-                                        }
-                                    }
-                                )
-                                
-                                isDownloading = false
-                                if (success) {
-                                    downloadComplete = true
-                                    url = "" // Clear the URL after successful download
-                                } else {
-                                    snackbarHostState.showSnackbar("Download failed. Please try again.")
-                                }
-                            } else {
-                                isExtracting = false
-                                snackbarHostState.showSnackbar("Failed to extract media. Please check the link.")
-                            }
-                        }
+                        onStartDownload(url)
                     }
                 },
-                enabled = !isExtracting && !isDownloading && url.isNotBlank(),
+                enabled = !downloadState.isExtracting && !downloadState.isDownloading && url.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
-                if (isExtracting || isDownloading) {
+                if (downloadState.isExtracting || downloadState.isDownloading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp), 
                         strokeWidth = 3.dp,
@@ -919,6 +984,13 @@ class MainActivity : ComponentActivity() {
             
             addJavascriptInterface(spider, "phoenix")
             
+            webChromeClient = object : android.webkit.WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                    android.util.Log.d("SmuleRodDebug", "WebView Console: ${consoleMessage?.message()}")
+                    return true
+                }
+            }
+            
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
                     android.util.Log.d("SmuleRodDebug", "WebView onPageFinished: $url")
@@ -926,32 +998,59 @@ class MainActivity : ComponentActivity() {
                     val script = """
                         var phxVideoIsFound=false;
                         var phxVideoSpiderTicks=0;
-                        var phxVideoSpiderTickCount=30;
+                        var phxVideoSpiderTickCount=50;
+                        console.log('Starting Smule Spider...');
                         smuleVideoSpider();
                         function smuleVideoSpider(){
                             try{
-                                if(phxVideoIsFound)return;
+                                if(phxVideoIsFound) return;
                                 phxVideoSpiderTicks++;
                                 var data={};
-                                var script=window.DataStore.Pages.Recording;
-                                var video=document.querySelector('video');
-                                var audio=document.querySelector('audio');
-                                if(script){
-                                    var json=script.performance;
-                                    data.title=json.title;
-                                    data.cover_url=json.cover_url;
-                                    data.handle=json.owner.handle;
-                                    if(video){data.url=video.src}
-                                    if(audio){data.url=audio.src}
-                                    if(data.url){
-                                        phxVideoIsFound=true;
-                                        phoenix.OnVideoFound(JSON.stringify(data))
-                                    }
+                                
+                                // Try to find metadata in DataStore
+                                var recording = null;
+                                if(window.DataStore && window.DataStore.Pages) {
+                                    var pages = window.DataStore.Pages;
+                                    recording = pages.Recording || pages.Listen || pages.RecordingPlayer || pages.Song;
                                 }
-                            }catch(e){console.log('e===='+e)}
-                            if(!phxVideoIsFound){
-                                if(phxVideoSpiderTicks<phxVideoSpiderTickCount){
-                                    setTimeout("smuleVideoSpider()",1000)
+                                
+                                if(recording && recording.performance) {
+                                    var json = recording.performance;
+                                    data.title = json.title || document.title || 'Recording';
+                                    data.cover_url = json.cover_url;
+                                    data.handle = (json.owner && json.owner.handle) || json.performed_by || '';
+                                } else {
+                                    data.title = document.title || 'Recording';
+                                }
+
+                                // Find media element
+                                var video = document.querySelector('video');
+                                var audio = document.querySelector('audio');
+                                var mediaUrl = null;
+                                
+                                if(video && video.src && video.src.indexOf('http') === 0) {
+                                    mediaUrl = video.src;
+                                } else if(audio && audio.src && audio.src.indexOf('http') === 0) {
+                                    mediaUrl = audio.src;
+                                }
+                                
+                                if(mediaUrl) {
+                                    console.log('Media found! URL: ' + mediaUrl);
+                                    data.url = mediaUrl;
+                                    phxVideoIsFound = true;
+                                    phoenix.OnVideoFound(JSON.stringify(data));
+                                } else if(phxVideoSpiderTicks % 10 === 0) {
+                                    console.log('Still searching... (Tick ' + phxVideoSpiderTicks + ')');
+                                }
+                            } catch(e) {
+                                console.log('Spider Error: ' + e);
+                            }
+                            
+                            if(!phxVideoIsFound) {
+                                if(phxVideoSpiderTicks < phxVideoSpiderTickCount) {
+                                    setTimeout(smuleVideoSpider, 300);
+                                } else {
+                                    console.log('Spider timed out after 15 seconds');
                                 }
                             }
                         }
@@ -965,7 +1064,7 @@ class MainActivity : ComponentActivity() {
         webView.loadUrl(url)
         
         withContext(Dispatchers.IO) {
-            latch.await(45, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(20, java.util.concurrent.TimeUnit.SECONDS)
         }
         
         val finalResult = resultJson
@@ -1066,7 +1165,6 @@ class MainActivity : ComponentActivity() {
             }
             
             // Extract performance key from URL path
-            // URL format: /sing-recording/{key} or /recording/{key} or /p/{key}
             val performanceKey = path.split("/").lastOrNull { it.isNotBlank() }
             if (performanceKey.isNullOrBlank()) {
                 android.util.Log.e("SmuleRodDebug", "Failed to extract performance key from: $path")
@@ -1075,165 +1173,25 @@ class MainActivity : ComponentActivity() {
             
             android.util.Log.d("SmuleRodDebug", "Performance key: $performanceKey")
             
-            var jsonData: String? = null
-
-            // 1. Try oEmbed endpoint (often less protected)
-            try {
-                // Use the /p/ format for oEmbed as it's more standard
-                val targetUrl = "https://www.smule.com/p/$performanceKey"
-                val oEmbedUrl = "https://www.smule.com/en/utils/oembed?url=${java.net.URLEncoder.encode(targetUrl, "UTF-8")}&format=json"
-                android.util.Log.d("SmuleRodDebug", "Trying oEmbed: $oEmbedUrl")
-                val oEmbedRequest = Request.Builder()
-                    .url(oEmbedUrl)
-                    .header("User-Agent", USER_AGENT)
-                    .header("Accept", "application/json")
-                    .build()
-                val oEmbedResponse = client.newCall(oEmbedRequest).execute()
-                if (oEmbedResponse.code == 200) {
-                    val oEmbedData = oEmbedResponse.body?.string() ?: ""
-                    if (oEmbedData.contains("video_media_mp4_url") || oEmbedData.contains("media_url")) {
-                        jsonData = oEmbedData
-                        android.util.Log.d("SmuleRodDebug", "Found data in oEmbed")
-                    }
-                } else {
-                    android.util.Log.d("SmuleRodDebug", "oEmbed failed with code: ${oEmbedResponse.code}")
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("SmuleRodDebug", "oEmbed failed: ${e.message}")
-            }
-
-            // 2. Try Smule's API endpoint directly
-            if (jsonData.isNullOrBlank()) {
-                val apiUrl = "https://www.smule.com/s/performance/$performanceKey"
-                android.util.Log.d("SmuleRodDebug", "Trying API URL: $apiUrl")
+            // Use the original clean URL - it has the full path which works better
+            android.util.Log.d("SmuleRodDebug", "Loading WebView: $cleanUrl")
+            
+            val spiderJson = extractMediaWithWebView(cleanUrl)
+            if (!spiderJson.isNullOrBlank()) {
+                android.util.Log.d("SmuleRodDebug", "Spider found data: $spiderJson")
                 
-                val apiRequest = Request.Builder()
-                    .url(apiUrl)
-                    .header("User-Agent", USER_AGENT)
-                    .header("Accept", "application/json, text/plain, */*")
-                    .header("Referer", "https://www.smule.com/")
-                    .build()
+                // Parse the spider JSON
+                val spiderTitle = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: "Recording"
+                val spiderUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: ""
                 
-                try {
-                    val apiResponse = client.newCall(apiRequest).execute()
-                    android.util.Log.d("SmuleRodDebug", "API response code: ${apiResponse.code}")
-                    
-                    if (apiResponse.code == 200) {
-                        jsonData = apiResponse.body?.string()
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("SmuleRodDebug", "API request failed: ${e.message}")
+                if (spiderUrl.isNotBlank()) {
+                    val isVideo = spiderUrl.contains("mp4") || spiderUrl.contains("renvideo") || spiderUrl.contains("video")
+                    android.util.Log.d("SmuleRodDebug", "Found media: $spiderUrl (isVideo: $isVideo)")
+                    return@withContext SmuleMedia(spiderTitle, spiderUrl, isVideo = isVideo)
                 }
             }
             
-            // 3. If API didn't work, try the web page with WebView
-            if (jsonData.isNullOrBlank() || jsonData.length < 1000) {
-                android.util.Log.d("SmuleRodDebug", "API failed, trying WebView fallback")
-                
-                // Try multiple URL formats in order of reliability
-                val urlsToTry = listOf(
-                    "https://www.smule.com/recording/$performanceKey",
-                    "https://www.smule.com/p/$performanceKey",
-                    cleanUrl // Original URL
-                )
-                
-                for (webUrl in urlsToTry) {
-                    android.util.Log.d("SmuleRodDebug", "Trying WebView with URL: $webUrl")
-                    val spiderJson = extractMediaWithWebView(webUrl)
-                    if (!spiderJson.isNullOrBlank()) {
-                        android.util.Log.d("SmuleRodDebug", "Spider found data: $spiderJson")
-                        
-                        // Parse the spider JSON
-                        val spiderTitle = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: "Smule_Recording"
-                        val spiderUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(spiderJson)?.groupValues?.get(1) ?: ""
-                        
-                        if (spiderUrl.isNotBlank()) {
-                            // The spider returns the direct CDN URL, so we can return it immediately!
-                            val isVideo = spiderUrl.contains("mp4") || spiderUrl.contains("renvideo")
-                            android.util.Log.d("SmuleRodDebug", "Returning spider media: $spiderUrl (isVideo: $isVideo)")
-                            return@withContext SmuleMedia(spiderTitle, spiderUrl, isVideo = isVideo)
-                        }
-                    }
-                }
-            }
-            
-            if (jsonData.isNullOrBlank() || jsonData.length < 1000) {
-                android.util.Log.e("SmuleRodDebug", "Failed to get performance data after all attempts")
-                return@withContext null
-            }
-            
-            android.util.Log.d("SmuleRodDebug", "Got data, length: ${jsonData.length}")
-            
-            // Parse title
-            val titleMatch = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            val title = titleMatch?.groupValues?.get(1)?.replace("\\u0026", "&") ?: "Smule_Recording"
-            android.util.Log.d("SmuleRodDebug", "Title: $title")
-            
-            // Detect performance type from the JSON
-            val typeMatch = Regex("\"type\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            val performanceType = typeMatch?.groupValues?.get(1) ?: "unknown"
-            val isVideoPerformance = performanceType == "video" || performanceType == "visualizer"
-            android.util.Log.d("SmuleRodDebug", "Performance type: $performanceType, isVideo: $isVideoPerformance")
-            
-            // Extract all potential media URLs upfront
-            val mp4UrlMatch = Regex("\"video_media_mp4_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            val videoUrlMatch = Regex("\"video_media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            val visualizerUrlMatch = Regex("\"visualizer_media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            val mediaUrlMatch = Regex("\"media_url\"\\s*:\\s*\"([^\"]+)\"").find(jsonData)
-            
-            val encryptedMp4 = mp4UrlMatch?.groupValues?.get(1) ?: ""
-            val encryptedVideo = videoUrlMatch?.groupValues?.get(1) ?: ""
-            val encryptedVisualizer = visualizerUrlMatch?.groupValues?.get(1) ?: ""
-            val encryptedMedia = mediaUrlMatch?.groupValues?.get(1) ?: ""
-            
-            android.util.Log.d("SmuleRodDebug", "Found URLs - MP4: ${encryptedMp4.take(30)}, Video: ${encryptedVideo.take(30)}, Visualizer: ${encryptedVisualizer.take(30)}, Media: ${encryptedMedia.take(30)}")
-            
-            val refererUrl = "https://www.smule.com$path"
-            
-            // Priority order: video_media_mp4_url > visualizer_media_url > video_media_url > media_url (video) > media_url (audio)
-            
-            // Try video_media_mp4_url first (best quality for regular videos)
-            if (encryptedMp4.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedMp4, refererUrl)
-                if (resolvedUrl != null) {
-                    android.util.Log.d("SmuleRodDebug", "Returning MP4 video: $resolvedUrl")
-                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                }
-            }
-            
-            // Try visualizer_media_url (for visualizer/text animation videos)
-            if (encryptedVisualizer.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedVisualizer, refererUrl)
-                if (resolvedUrl != null) {
-                    android.util.Log.d("SmuleRodDebug", "Returning visualizer video: $resolvedUrl")
-                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                }
-            }
-            
-            // Try video_media_url
-            if (encryptedVideo.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedVideo, refererUrl)
-                if (resolvedUrl != null) {
-                    android.util.Log.d("SmuleRodDebug", "Returning video_media: $resolvedUrl")
-                    return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                }
-            }
-            
-            // Fallback to media_url - mark as video if performance type is video/visualizer
-            if (encryptedMedia.isNotBlank()) {
-                val resolvedUrl = resolveSmuleUrl(encryptedMedia, refererUrl)
-                if (resolvedUrl != null) {
-                    if (isVideoPerformance) {
-                        android.util.Log.w("SmuleRodDebug", "Falling back to media_url for video performance: $resolvedUrl")
-                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = true)
-                    } else {
-                        android.util.Log.d("SmuleRodDebug", "Returning audio: $resolvedUrl")
-                        return@withContext SmuleMedia(title, resolvedUrl, isVideo = false)
-                    }
-                }
-            }
-            
-            android.util.Log.e("SmuleRodDebug", "No media URL could be resolved")
+            android.util.Log.e("SmuleRodDebug", "Failed to extract media from WebView")
             return@withContext null
         } catch (e: java.net.UnknownHostException) {
             android.util.Log.e("SmuleRodDebug", "DNS Error: ${e.message}")
@@ -1255,7 +1213,8 @@ class MainActivity : ComponentActivity() {
     ): Boolean = withContext(Dispatchers.IO) {
         try {
             val ext = if (media.isVideo) "mp4" else "m4a"
-            val fileName = "${media.title.replace(Regex("[^a-zA-Z0-9-_ ]"), "_")}.$ext"
+            val sanitizedTitle = media.title.replace(Regex("[^a-zA-Z0-9-_ ]"), "_").take(100)
+            val fileName = "SmuleRod_${sanitizedTitle}.$ext"
             
             android.util.Log.d("SmuleRodDebug", "Downloading: $fileName from ${media.url}")
             
@@ -1307,7 +1266,7 @@ class MainActivity : ComponentActivity() {
                 val contentValues = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                     put(MediaStore.MediaColumns.MIME_TYPE, if (media.isVideo) "video/mp4" else "audio/m4a")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/SmuleRod")
                 }
                 
                 val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
@@ -1376,7 +1335,7 @@ class MainActivity : ComponentActivity() {
             MediaStore.MediaColumns.DATE_ADDED
         )
         
-        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE '%Smule%'"
+        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'SmuleRod_%'"
         
         context.contentResolver.query(collection, projection, selection, null, "${MediaStore.MediaColumns.DATE_ADDED} DESC")?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
@@ -1386,8 +1345,8 @@ class MainActivity : ComponentActivity() {
 
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameCol)
-                // Filter for files we likely downloaded
-                if (name.contains("Smule", ignoreCase = true)) {
+                // Filter for files we downloaded (prefixed with SmuleRod_)
+                if (name.startsWith("SmuleRod_", ignoreCase = true)) {
                     val id = cursor.getLong(idCol)
                     val size = cursor.getLong(sizeCol)
                     val date = cursor.getLong(dateCol)
